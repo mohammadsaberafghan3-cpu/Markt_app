@@ -1,7 +1,7 @@
 FROM node:20-bookworm-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
-COPY nova_marketplace_refunds_phase.zip /tmp/nova-market.zip
+COPY NOVAMARKET.zip /tmp/nova-market.zip
 RUN unzip -q /tmp/nova-market.zip -d /tmp/nova-src \
  && cp -a /tmp/nova-src/nova_marketplace/. /app/ \
  && rm -rf /tmp/nova-src /tmp/nova-market.zip
