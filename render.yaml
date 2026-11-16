@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: nova-market-preview
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /tmp/nova-data
+      - key: DATABASE_PATH
+        value: /tmp/nova-data/nova.sqlite
+      - key: UPLOAD_DIR
+        value: /tmp/nova-data/uploads
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@novamarket.local
+      - key: ADMIN_PASSWORD
+        sync: false
