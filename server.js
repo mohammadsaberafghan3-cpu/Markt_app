@@ -4,6 +4,7 @@ const SQLiteStore=require('connect-sqlite3')(session);
 const bcrypt=require('bcryptjs');
 const helmet=require('helmet');
 const path=require('path');
+if(process.env.NODE_ENV==='production'&&(!process.env.ADMIN_PASSWORD||!process.env.SESSION_SECRET))throw new Error('Set ADMIN_PASSWORD and SESSION_SECRET before production startup');
 const db=require('./db');
 const app=express();
 const PORT=process.env.PORT||3000;
