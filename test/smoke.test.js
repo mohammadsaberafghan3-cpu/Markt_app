@@ -14,6 +14,8 @@ test('database initializes core marketplace tables and admin account',()=>{
  assert.equal(db.prepare('SELECT role FROM users WHERE email=?').get('test-admin@nova.local').role,'admin');
 });
 test('foreign keys are enabled',()=>assert.equal(db.pragma('foreign_keys',{simple:true}),1));
+test('fresh preview has sample products from an approved demo vendor',()=>{assert.ok(db.prepare('SELECT COUNT(*) n FROM products').get().n>=8);assert.equal(db.prepare("SELECT status FROM vendors WHERE store_name='NOVA Select'").get().status,'approved')});
+
 test('product stock cannot be negative',()=>{
  const u=db.prepare("INSERT INTO users(name,email,password_hash,role) VALUES('Vendor','vendor@nova.local','x','vendor')").run();
  const v=db.prepare("INSERT INTO vendors(user_id,store_name,status) VALUES(?,?,?)").run(u.lastInsertRowid,'Test Store','approved');
