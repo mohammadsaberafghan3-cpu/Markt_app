@@ -1,33 +1,31 @@
-# NOVA MARKET — mobile-first online preview
+# NOVA MARKET 2.0 — from-scratch rebuild
 
-This repository contains the deployment wrapper for the NOVA MARKET application.
+A new independent implementation of the NOVA MARKET multi-vendor marketplace. Work is isolated on the `nova-market-rebuild` branch; the existing `main` deployment is intentionally preserved.
 
-## One-time setup from an Android phone (no terminal)
+## Stack
+- Node.js 20+, Express
+- SQLite via better-sqlite3, foreign keys and transactional order creation
+- Vanilla HTML/CSS/JavaScript, Persian RTL and responsive mobile-first layout
+- Session authentication, bcrypt password hashing and role-protected APIs
 
-1. Download `nova_marketplace_refunds_phase.zip` from the ChatGPT conversation.
-2. Open this repository: https://github.com/mohammadsaberafghan3-cpu/Markt_app
-3. In GitHub, choose **Add file → Upload files** (or the upload option in the mobile browser menu).
-4. Upload the ZIP to the repository root. Keep the exact filename:
-   `nova_marketplace_refunds_phase.zip`
-5. Commit the upload to the `main` branch.
-6. Open Render and create a new **Blueprint** from this GitHub repository. Render reads `render.yaml`.
-7. When Render asks for `ADMIN_PASSWORD`, enter a new strong password and save it.
-8. Wait for the Docker build and deployment to finish. Open the generated `.onrender.com` URL.
+## Deploy preview
+Connect this branch to a separate Render preview service using the included Blueprint. Set a unique strong `ADMIN_PASSWORD` and `SESSION_SECRET`. The admin email is configurable using `ADMIN_EMAIL`.
 
-## Important preview limitations
+## Current implementation
+- Premium RTL storefront, category filter, search, product cards and cart
+- Customer registration/login and order history
+- Vendor application and approval workflow
+- Vendor product management, vendor-specific orders and wallet summary
+- Admin overview, vendor approvals, order overview and settlement decisions
+- Test-mode checkout, inventory decrement, commission calculation and wallet ledger
+- Health endpoint at `/health`
 
-- This blueprint uses Render's free web-service plan so the first visual preview can be launched without choosing a paid plan.
-- Free services may sleep when idle and can take a short time to wake up.
-- The free preview uses temporary storage under `/tmp`. Database records and uploaded product images are **not guaranteed to persist** across restarts or redeployments. Do not use it for real customers or real orders.
-- A production deployment needs persistent storage or a managed database, a stable domain, backups, and real payment-provider integration.
-- Payments and refunds in this code are test-mode simulations only.
+## Explicit limitations
+- Checkout records a test-mode order; no real payment gateway is connected.
+- Settlement approval updates the internal ledger; it does not transfer money.
+- Returns/refunds, shipping integrations, image upload pipeline, notifications, product variants, customer management UI, advanced reports, and automated browser/E2E tests are not implemented yet.
+- Render Free uses temporary filesystem storage. Data is not safe for production.
+- This is a working foundation under development, not a production-certified marketplace.
 
-## Application
-
-- Node.js 20+
-- Express + SQLite
-- Persian RTL storefront
-- Admin, seller, and customer areas
-- Test-mode checkout, seller commission ledger, settlement requests, and full-refund workflow
-
-The Dockerfile extracts the application source from the uploaded ZIP and installs production dependencies automatically. No terminal commands are required from the phone user.
+## Local run
+Node.js 20+ and native build tools are required for better-sqlite3. Run `npm install`, set `ADMIN_PASSWORD` and `SESSION_SECRET`, then `npm start`.
