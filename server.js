@@ -394,6 +394,12 @@ app.get("/api/manage/products",roles("admin","seller"),(req,res)=>{
   if(req.session.user.role==="seller") return res.json(q("SELECT * FROM products WHERE seller_id=? ORDER BY id DESC",req.session.user.id));
   res.json(q("SELECT p.*,u.name seller_name FROM products p LEFT JOIN users u ON u.id=p.seller_id ORDER BY p.id DESC"));
 });
+app.patch("/api/manage/products/:id/status",roles("admin"),(req,res)=>{
+ const id=Number(req.params.id),status=String(req.body?.status||"");
+ if(!Number.isSafeInteger(id)||id<1||!["active","pending","hidden"].includes(status))return res.status(400).json({error:"شناسه یا وضعیت محصول معتبر نیست"});
+ const p=one("SELECT id FROM products WHERE id=?",id);if(!p)return res.status(404).json({error:"محصول پیدا نشد"});
+ run("UPDATE products SET status=? WHERE id=?",status,id);audit(req.session.user.id,"product.status",id+":"+status);res.json({ok:true,status});
+});
 app.post("/api/upload",roles("admin","seller"),upload.single("image"),(req,res)=>{
   if(!req.file)return res.status(400).json({error:"فایل تصویر معتبر (حداکثر ۴ مگابایت) انتخاب کنید"});
   res.json({url:"/uploads/"+req.file.filename});
@@ -402,6 +408,7 @@ app.post("/api/manage/products",roles("admin","seller"),(req,res)=>{
   const b=req.body||{};
   if(!b.title||Number(b.price)<0)return res.status(400).json({error:"عنوان و قیمت معتبر لازم است"});
   const seller=req.session.user.role==="seller"?req.session.user.id:(Number(b.seller_id)||null);
+  if(seller&&!one("SELECT id FROM seller_applications WHERE user_id=? AND status='approved'",seller))return res.status(400).json({error:"محصول فقط برای فروشنده تأییدشده قابل ثبت است"});
   const status=req.session.user.role==="admin"?"active":"pending";
   const r=run("INSERT INTO products(seller_id,category_id,title,description,price,compare_price,stock,sku,image,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
     seller,Number(b.category_id)||null,String(b.title),String(b.description||""),Number(b.price),Number(b.compare_price)||0,Math.max(0,Number(b.stock)||0),String(b.sku||""),String(b.image||""),status);
