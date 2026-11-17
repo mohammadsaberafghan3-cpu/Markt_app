@@ -239,61 +239,92 @@ app.get("/api/products/:id",(req,res)=>{
   if(!p)return res.status(404).json({error:"محصول پیدا نشد"});res.json(p);
 });
 app.post("/api/orders",auth,(req,res)=>{
-  const {items,address}=req.body||{};
-  if(!Array.isArray(items)||!items.length||!String(address||'').trim()) return res.status(400).json({error:"سبد خرید و نشانی تحویل لازم است"});
-  const create=db.transaction(()=>{
-    let total=0; const normalized=[]; const quantities=new Map();
-    for(const item of items){
-      const id=Number(item.id), qty=Number(item.quantity);
-      if(!Number.isSafeInteger(id)||id<1||!Number.isSafeInteger(qty)||qty<1||qty>99) throw new Error("اقلام سفارش نامعتبر است");
-      quantities.set(id,(quantities.get(id)||0)+qty);
+ if(req.session.user.role!=="customer")return res.status(403).json({error:"ثبت سفارش فقط با حساب مشتری امکان‌پذیر است"});
+ const items=Array.isArray(req.body?.items)?req.body.items:[],address=String(req.body?.address||"").trim();
+ if(!items.length||items.length>30||address.length<5||address.length>500)return res.status(400).json({error:"سبد خرید یا نشانی تحویل معتبر نیست"});
+ const quantities=new Map();
+ for(const item of items){const id=Number(item?.id),qty=Number(item?.quantity);if(!Number.isSafeInteger(id)||id<1||!Number.isSafeInteger(qty)||qty<1||qty>99)return res.status(400).json({error:"شناسه یا تعداد محصول معتبر نیست"});quantities.set(id,(quantities.get(id)||0)+qty)}
+ const normalized=Array.from(quantities.entries()).map(([id,quantity])=>({id,quantity})).sort((a,b)=>a.id-b.id);
+ if(normalized.some(x=>x.quantity>99))return res.status(400).json({error:"تعداد هر کالا نمی‌تواند بیش از ۹۹ باشد"});
+ const key=String(req.get("Idempotency-Key")||req.body?.idempotency_key||crypto.randomUUID()).trim();
+ if(key.length<8||key.length>100)return res.status(400).json({error:"کلید یکتای درخواست معتبر نیست"});
+ const requestHash=hashRequest({items:normalized,address});
+ const previous=one("SELECT p.*,o.customer_id,o.total,o.currency FROM payment_transactions p JOIN orders o ON o.id=p.order_id WHERE p.idempotency_key=?",key);
+ if(previous){if(previous.customer_id!==req.session.user.id||previous.request_hash!==requestHash)return res.status(409).json({error:"این کلید قبلاً برای سفارش دیگری استفاده شده است"});return res.status(200).json({orderId:previous.order_id,paymentReference:previous.reference,paymentMode:"test",paymentStatus:previous.status,total:previous.total,currency:previous.currency,reused:true})}
+ try{
+  const result=db.transaction(()=>{
+   const configured=one("SELECT value FROM settings WHERE key='currency'").value,language=String(req.get("accept-language")||"").toLowerCase();
+   const currency=configured!=="auto"?configured:(language.includes("fa")?"IRR":language.includes("en-us")?"USD":language.includes("en-gb")?"GBP":"EUR");
+   const globalRate=Number(one("SELECT value FROM settings WHERE key='commission_rate'").value);
+   if(!Number.isFinite(globalRate)||globalRate<0||globalRate>50)throw new Error("نرخ کمیسیون پیکربندی‌شده معتبر نیست");
+   const lines=[];let total=0,commissionTotal=0;
+   for(const item of normalized){
+    const p=one("SELECT * FROM products WHERE id=? AND status='active'",item.id);
+    if(!p||p.stock<item.quantity)throw new Error("موجودی یکی از محصولات کافی نیست");
+    let rate=0;
+    if(p.seller_id){
+     const seller=one("SELECT status,commission_override FROM seller_applications WHERE user_id=?",p.seller_id);
+     if(!seller||seller.status!=="approved")throw new Error("فروشنده این محصول تأیید نشده است");
+     rate=seller.commission_override===null||seller.commission_override===undefined?globalRate:Number(seller.commission_override);
     }
-    for(const [id,qty] of quantities){
-      if(qty>99)throw new Error("تعداد هر کالا نمی‌تواند بیش از ۹۹ باشد");
-      const p=one("SELECT * FROM products WHERE id=? AND status='active'",id);
-      if(!p||p.stock<qty) throw new Error("موجودی یکی از محصولات کافی نیست");
-      total=Math.round((total+p.price*qty)*100)/100; normalized.push({p,qty});
-    }
-    const configuredCurrency=one("SELECT value FROM settings WHERE key='currency'").value;
-    const language=String(req.get("accept-language")||"").toLowerCase();
-    const currency=configuredCurrency!=="auto"?configuredCurrency:(language.includes("fa")?"IRR":language.includes("en-us")?"USD":language.includes("en-gb")?"GBP":"EUR");
-    const o=run("INSERT INTO orders(customer_id,total,currency,status,address) VALUES(?,?,?,'pending_payment',?)",req.session.user.id,total,currency,String(address).trim().slice(0,500));
-    for(const x of normalized) run("INSERT INTO order_items(order_id,product_id,seller_id,title,quantity,unit_price) VALUES(?,?,?,?,?,?)",o.lastInsertRowid,x.p.id,x.p.seller_id,x.p.title,x.qty,x.p.price);
-    const ref='NOVA-'+crypto.randomBytes(12).toString('hex').toUpperCase();
-    run("INSERT INTO payment_transactions(order_id,amount,currency,reference) VALUES(?,?,?,?)",o.lastInsertRowid,total,currency,ref);
-    return {orderId:o.lastInsertRowid,paymentReference:ref,paymentMode:one("SELECT value FROM settings WHERE key='payment_mode'").value,total,currency};
-  });
-  try{res.status(201).json(create());}catch(e){res.status(400).json({error:e.message});}
+    const gross=Math.round(p.price*item.quantity*100)/100;
+    const amounts=p.seller_id?calculateCommission(gross,rate):{gross,commission:0,net:gross};
+    total=Math.round((total+amounts.gross)*100)/100;commissionTotal=Math.round((commissionTotal+amounts.commission)*100)/100;
+    lines.push({product:p,quantity:item.quantity,rate,commission:amounts.commission});
+   }
+   const order=run("INSERT INTO orders(customer_id,total,currency,status,address,payment_status,commission_total) VALUES(?,?,?,'pending_payment',?,'pending',?)",req.session.user.id,total,currency,address,commissionTotal);
+   const addItem=db.prepare("INSERT INTO order_items(order_id,product_id,seller_id,title,quantity,unit_price,commission_rate,commission_amount) VALUES(?,?,?,?,?,?,?,?)");
+   for(const line of lines)addItem.run(order.lastInsertRowid,line.product.id,line.product.seller_id,line.product.title,line.quantity,line.product.price,line.rate,line.commission);
+   const reference="NOVA-"+crypto.randomBytes(12).toString("hex").toUpperCase();
+   run("INSERT INTO payment_transactions(order_id,provider,mode,amount,currency,status,reference,idempotency_key,request_hash,updated_at) VALUES(?,'mock','test',?,?,'pending',?,?,?,CURRENT_TIMESTAMP)",order.lastInsertRowid,total,currency,reference,key,requestHash);
+   audit(req.session.user.id,"order.created",order.lastInsertRowid+":test-payment-pending");
+   return {orderId:order.lastInsertRowid,paymentReference:reference,paymentMode:"test",paymentStatus:"pending",total,currency};
+  })();
+  res.status(201).json(result);
+ }catch(e){
+  const raced=one("SELECT p.*,o.customer_id,o.total,o.currency FROM payment_transactions p JOIN orders o ON o.id=p.order_id WHERE p.idempotency_key=?",key);
+  if(raced&&raced.customer_id===req.session.user.id&&raced.request_hash===requestHash)return res.status(200).json({orderId:raced.order_id,paymentReference:raced.reference,paymentMode:"test",paymentStatus:raced.status,total:raced.total,currency:raced.currency,reused:true});
+  res.status(400).json({error:e.message||"ثبت سفارش انجام نشد"});
+ }
 });
 // Explicit test-only payment confirmation. It cannot represent a real gateway callback.
 app.post("/api/payments/test/confirm",auth,(req,res)=>{
-  const ref=String(req.body.reference||'').trim();
-  if(!ref)return res.status(400).json({error:"شناسه پرداخت لازم است"});
-  try{
-    const result=db.transaction(()=>{
-      const tx=one("SELECT t.*,o.customer_id,o.status order_status,o.id oid FROM payment_transactions t JOIN orders o ON o.id=t.order_id WHERE t.reference=?",ref);
-      if(!tx||tx.customer_id!==req.session.user.id)return {error:"تراکنش پیدا نشد",code:404};
-      if(one("SELECT value FROM settings WHERE key='payment_mode'").value!=="test"||tx.mode!=="test")return {error:"حالت آزمایشی پرداخت فعال نیست",code:409};
-      if(tx.status==='paid')return {ok:true,alreadyPaid:true,orderId:tx.oid};
-      if(tx.status!=='pending')return {error:"وضعیت تراکنش قابل پرداخت نیست",code:409};
-      const items=q("SELECT * FROM order_items WHERE order_id=?",tx.oid);
-      for(const item of items){const product=one("SELECT stock FROM products WHERE id=?",item.product_id);if(!product||product.stock<item.quantity)throw new Error("موجودی کالا پس از ثبت سفارش کافی نیست؛ با مدیر تماس بگیرید");}
-      run("UPDATE payment_transactions SET status='paid',provider_reference=?,paid_at=CURRENT_TIMESTAMP,payload_json=? WHERE id=?",'TEST-'+crypto.randomBytes(8).toString('hex'),JSON.stringify({simulated:true}),tx.id);
-      run("UPDATE orders SET status='new' WHERE id=?",tx.oid);
-      const rate=Number(one("SELECT value FROM settings WHERE key='commission_rate'").value);
-      if(!Number.isFinite(rate)||rate<0||rate>50)throw new Error("نرخ کمیسیون پیکربندی‌شده نامعتبر است");
-      for(const item of items){
-        run("UPDATE products SET stock=stock-? WHERE id=?",item.quantity,item.product_id);
-        if(item.seller_id){
-          const amounts=calculateCommission(item.quantity*item.unit_price,rate);
-          run("INSERT INTO marketplace_commissions(order_id,order_item_id,seller_id,gross_amount,commission_rate,commission_amount,seller_net,currency) VALUES(?,?,?,?,?,?,?,?)",tx.oid,item.id,item.seller_id,amounts.gross,rate,amounts.commission,amounts.net,tx.currency);
-          run("INSERT INTO seller_wallet_entries(seller_id,order_id,type,amount,currency,description) VALUES(?,?,'credit',?,?,?)",item.seller_id,tx.oid,amounts.net,tx.currency,`فروش سفارش ${tx.oid}؛ کمیسیون ${rate}%`);
-        }
-      }
-      return {ok:true,alreadyPaid:false,orderId:tx.oid};
-    })();
-    if(result.error)return res.status(result.code).json({error:result.error});res.json(result);
-  }catch(e){res.status(400).json({error:e.message});}
+ if(req.session.user.role!=="customer")return res.status(403).json({error:"این عملیات فقط برای حساب مشتری مجاز است"});
+ const ref=String(req.body?.reference||"").trim();if(!ref)return res.status(400).json({error:"شناسه پرداخت لازم است"});
+ try{
+  const result=db.transaction(()=>{
+   const tx=one("SELECT t.*,o.customer_id,o.id oid FROM payment_transactions t JOIN orders o ON o.id=t.order_id WHERE t.reference=?",ref);
+   if(!tx||tx.customer_id!==req.session.user.id)return {error:"تراکنش پیدا نشد",code:404};
+   if(one("SELECT value FROM settings WHERE key='payment_mode'").value!=="test"||tx.mode!=="test")return {error:"حالت آزمایشی پرداخت فعال نیست",code:409};
+   if(tx.status==="paid")return {ok:true,alreadyPaid:true,orderId:tx.oid};
+   if(tx.status!=="pending")return {error:"وضعیت تراکنش قابل پرداخت نیست",code:409};
+   const items=q("SELECT * FROM order_items WHERE order_id=? ORDER BY id",tx.oid);
+   for(const item of items){const p=one("SELECT stock,status FROM products WHERE id=?",item.product_id);if(!p||p.status!=="active"||p.stock<item.quantity){run("UPDATE payment_transactions SET status='failed',failure_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'","موجودی کالا هنگام تأیید کافی نیست",tx.id);run("UPDATE orders SET status='payment_failed',payment_status='failed' WHERE id=?",tx.oid);return {error:"موجودی کالا پس از ثبت سفارش کافی نیست؛ پرداخت آزمایشی ناموفق شد",code:409}}}
+   for(const item of items){
+    const stock=run("UPDATE products SET stock=stock-? WHERE id=? AND stock>=? AND status='active'",item.quantity,item.product_id,item.quantity);
+    if(!stock.changes)throw new Error("موجودی کالا تغییر کرد؛ پرداخت تأیید نشد");
+    if(item.seller_id){
+     const rate=Number(item.commission_rate),gross=Math.round(item.quantity*item.unit_price*100)/100,amounts=calculateCommission(gross,rate);
+     const commissionAmount=Number(item.commission_amount||amounts.commission);
+     run("INSERT OR IGNORE INTO marketplace_commissions(order_id,order_item_id,seller_id,gross_amount,commission_rate,commission_amount,seller_net,currency) VALUES(?,?,?,?,?,?,?,?)",tx.oid,item.id,item.seller_id,gross,rate,commissionAmount,Math.round((gross-commissionAmount)*100)/100,tx.currency);
+     run("INSERT OR IGNORE INTO seller_wallet_entries(seller_id,order_id,type,amount,currency,description,reference_key) VALUES(?,?,'credit',?,?,?,?)",item.seller_id,tx.oid,Math.round((gross-commissionAmount)*100)/100,tx.currency,"فروش سفارش "+tx.oid+"؛ کمیسیون "+rate+"%","payment:"+tx.id+":item:"+item.id);
+    }
+   }
+   run("UPDATE payment_transactions SET status='paid',provider_reference=?,payload_json=?,paid_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'","TEST-"+crypto.randomBytes(8).toString("hex"),JSON.stringify({simulated:true}),tx.id);
+   run("UPDATE orders SET status='new',payment_status='paid' WHERE id=?",tx.oid);
+   audit(req.session.user.id,"payment.test.paid",tx.id+":"+tx.reference);
+   return {ok:true,alreadyPaid:false,orderId:tx.oid,testMode:true};
+  })();
+  if(result.error)return res.status(result.code).json({error:result.error});res.json(result);
+ }catch(e){res.status(409).json({error:e.message||"تأیید پرداخت انجام نشد"})}
+});
+app.post("/api/payments/test/fail",auth,(req,res)=>{
+ if(req.session.user.role!=="customer")return res.status(403).json({error:"این عملیات فقط برای حساب مشتری مجاز است"});
+ const ref=String(req.body?.reference||"").trim(),tx=one("SELECT t.*,o.customer_id FROM payment_transactions t JOIN orders o ON o.id=t.order_id WHERE t.reference=?",ref);
+ if(!tx||tx.customer_id!==req.session.user.id)return res.status(404).json({error:"تراکنش پیدا نشد"});
+ if(tx.mode!=="test"||tx.status!=="pending")return res.status(409).json({error:"این تراکنش قابل تغییر نیست"});
+ const change=db.transaction(()=>{run("UPDATE payment_transactions SET status='failed',failure_reason='شبیه‌سازی شکست پرداخت',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'",tx.id);run("UPDATE orders SET status='payment_failed',payment_status='failed' WHERE id=?",tx.order_id);audit(req.session.user.id,"payment.test.failed",tx.id)});
+ change();res.json({ok:true,status:"failed",testMode:true});
 });
 app.get("/api/payments/:reference",auth,(req,res)=>{
  const tx=one("SELECT t.reference,t.order_id,t.amount,t.currency,t.status,t.mode,t.created_at,t.paid_at,o.customer_id FROM payment_transactions t JOIN orders o ON o.id=t.order_id WHERE t.reference=?",String(req.params.reference));
