@@ -515,11 +515,31 @@ app.post("/api/seller/settlements",roles("seller"),(req,res)=>{
 app.get("/api/admin/commissions",roles("admin"),(req,res)=>res.json(q("SELECT c.*,u.name seller_name FROM marketplace_commissions c JOIN users u ON u.id=c.seller_id ORDER BY c.id DESC LIMIT 500")));
 app.get("/api/admin/settlements",roles("admin"),(req,res)=>res.json(q("SELECT s.*,u.name seller_name,u.email FROM settlements s JOIN users u ON u.id=s.seller_id ORDER BY s.id DESC")));
 app.patch("/api/admin/settlements/:id",roles("admin"),(req,res)=>{
- const status=String(req.body.status||''),reference=String(req.body.payout_reference||'').slice(0,100),note=String(req.body.admin_note||'').slice(0,500);
- if(!['approved','paid','rejected'].includes(status))return res.status(400).json({error:"وضعیت تسویه نامعتبر است"});
- const out=db.transaction(()=>{const s=one("SELECT * FROM settlements WHERE id=?",Number(req.params.id));if(!s)return null;if(!['requested','approved'].includes(s.status))throw new Error("این درخواست قبلاً نهایی شده است");if(status==='paid'){const bal=one("SELECT COALESCE(SUM(CASE WHEN type='credit' THEN amount ELSE -amount END),0) n FROM seller_wallet_entries WHERE seller_id=? AND currency=?",s.seller_id,s.currency).n;const held=one("SELECT COALESCE(SUM(amount),0) n FROM settlements WHERE seller_id=? AND currency=? AND status IN ('requested','approved') AND id<>?",s.seller_id,s.currency,s.id).n;if(!canRequestSettlement(bal,held,s.amount))throw new Error("موجودی قابل تسویه کافی نیست");run("INSERT INTO seller_wallet_entries(seller_id,settlement_id,type,amount,currency,description) VALUES(?,?,'debit',?,?,?)",s.seller_id,s.id,s.amount,s.currency,`تسویه شماره ${s.id}`);}
- run("UPDATE settlements SET status=?,payout_reference=?,admin_note=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",status,reference,note,s.id);return s;})();
- if(!out)return res.status(404).json({error:"درخواست تسویه پیدا نشد"});res.json({ok:true,status});
+ const id=Number(req.params.id),status=String(req.body?.status||""),reference=String(req.body?.payout_reference||"").trim().slice(0,100),note=String(req.body?.admin_note||"").trim().slice(0,500);
+ if(!Number.isSafeInteger(id)||id<1||!["approved","paid","rejected"].includes(status))return res.status(400).json({error:"وضعیت تسویه نامعتبر است"});
+ try{
+  const out=db.transaction(()=>{
+   const item=one("SELECT * FROM settlements WHERE id=?",id);if(!item)return null;
+   if(status==="approved"){
+    if(item.status!=="requested")throw new Error("فقط درخواست در انتظار قابل تأیید است");
+    run("UPDATE settlements SET status='approved',admin_note=?,reviewed_at=CURRENT_TIMESTAMP,processed_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",note,req.session.user.id,id);
+   }else if(status==="rejected"){
+    if(!["requested","approved"].includes(item.status))throw new Error("این درخواست قبلاً نهایی شده است");
+    run("UPDATE settlements SET status='rejected',admin_note=?,reviewed_at=CURRENT_TIMESTAMP,processed_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",note||"رد توسط مدیر",req.session.user.id,id);
+   }else{
+    if(item.status!=="approved")throw new Error("ابتدا درخواست باید تأیید شود");
+    if(reference.length<3)throw new Error("برای ثبت پرداخت دستی، شماره رسید الزامی است");
+    const bal=one("SELECT COALESCE(SUM(CASE WHEN type='credit' THEN amount ELSE -amount END),0) n FROM seller_wallet_entries WHERE seller_id=? AND currency=?",item.seller_id,item.currency).n;
+    const settlementHeld=one("SELECT COALESCE(SUM(amount),0) n FROM settlements WHERE seller_id=? AND currency=? AND status IN ('requested','approved') AND id<>?",item.seller_id,item.currency,id).n;
+    const refundHeld=one("SELECT COALESCE(SUM(c.seller_net),0) n FROM marketplace_commissions c JOIN refund_requests r ON r.order_id=c.order_id WHERE c.seller_id=? AND c.currency=? AND r.status='requested'",item.seller_id,item.currency).n;
+    if(!canRequestSettlement(bal,settlementHeld+refundHeld,item.amount))throw new Error("مانده قابل تسویه برای پرداخت کافی نیست");
+    run("INSERT OR IGNORE INTO seller_wallet_entries(seller_id,settlement_id,type,amount,currency,description,reference_key) VALUES(?,?,'debit',?,?,?,?)",item.seller_id,id,item.amount,item.currency,"تسویه شماره "+id+"؛ مرجع دستی "+reference,"settlement:"+id+":paid");
+    run("UPDATE settlements SET status='paid',payout_reference=?,admin_note=?,reviewed_at=CURRENT_TIMESTAMP,processed_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",reference,note,req.session.user.id,id);
+   }
+   audit(req.session.user.id,"settlement."+status,id+":"+reference);return true;
+  })();
+  if(!out)return res.status(404).json({error:"درخواست تسویه پیدا نشد"});res.json({ok:true,status,manualOnly:status==="paid"});
+ }catch(e){res.status(409).json({error:e.message||"تغییر وضعیت تسویه انجام نشد"})}
 });
 app.get("/api/admin/coupons",roles("admin"),(req,res)=>res.json(q("SELECT * FROM coupons ORDER BY id DESC")));
 app.post("/api/admin/coupons",roles("admin"),(req,res)=>{
