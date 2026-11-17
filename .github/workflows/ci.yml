@@ -1,0 +1,58 @@
+name: NOVA MARKET CI
+on:
+  push:
+    branches: [nova-market-rebuild]
+  pull_request:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - name: Report dependency advisories
+        run: |
+          npm audit --json > /tmp/nova-audit.json || true
+          node -e "const a=require('/tmp/nova-audit.json'); for (const [n,v] of Object.entries(a.vulnerabilities||{})) console.log(n+' | '+v.severity+' | direct='+v.isDirect+' | range='+v.range+' | fix='+JSON.stringify(v.fixAvailable)+' | '+v.via.map(x=>typeof x==='string'?x:x.title).join('; '));"
+      - run: node --check server.js && node --check public/app.js && node --check lib/finance.js
+      - run: npm test
+      - name: Inspect existing NOVAMARKET source archive
+        run: |
+          if [ -f NOVAMARKET.zip ]; then
+            echo "=== legacy package.json ==="
+            unzip -p NOVAMARKET.zip nova_marketplace/package.json
+            echo "=== legacy finance.js ==="
+            unzip -p NOVAMARKET.zip nova_marketplace/lib/finance.js
+            echo "=== legacy finance tests ==="
+            unzip -p NOVAMARKET.zip nova_marketplace/test/finance.test.js
+            echo "=== legacy server route outline ==="
+            unzip -p NOVAMARKET.zip nova_marketplace/server.js | grep -nE "payment|wallet|settle|commission|vendor|order" | sed -n '1,180p'
+          else
+            echo "No legacy archive in repository"
+          fi
+      - name: Build distributable source ZIP
+        run: |
+          mkdir -p /tmp/nova-package
+          git archive HEAD | tar -x -C /tmp/nova-package
+          rm -f /tmp/nova-package/NOVAMARKET.zip
+          cd /tmp/nova-package
+          zip -qr "$GITHUB_WORKSPACE/nova_marketplace_mvp.zip" .
+      - name: Extract original MVP for compatibility review
+        run: |
+          mkdir -p /tmp/nova-legacy
+          unzip -q NOVAMARKET.zip -d /tmp/nova-legacy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nova-legacy-source-review
+          path: /tmp/nova-legacy/nova_marketplace
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nova-marketplace-mvp
+          path: nova_marketplace_mvp.zip
+          if-no-files-found: error
+          retention-days: 30

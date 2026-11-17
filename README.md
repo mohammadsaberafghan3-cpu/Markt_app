@@ -1,33 +1,107 @@
-# NOVA MARKET — mobile-first online preview
+# NOVA MARKET — نسخه توسعه‌یافته MVP اصلی
 
-This repository contains the deployment wrapper for the NOVA MARKET application.
+این شاخه بر پایه فایل‌های اصلی داخل `NOVAMARKET.zip` بازسازی شده است؛ رابط فروشگاهی، دسته‌بندی‌ها، محصولات، تصاویر، کدهای تخفیف، پنل مشتری/فروشنده/مدیر، درخواست بازپرداخت و ساختار اولیه کیف‌پول حفظ شده‌اند. تغییرات مالی به‌صورت افزایشی روی همان مدل داده اعمال شده‌اند.
 
-## One-time setup from an Android phone (no terminal)
+## قابلیت‌های موجود در این نسخه
 
-1. Download `nova_marketplace_refunds_phase.zip` from the ChatGPT conversation.
-2. Open this repository: https://github.com/mohammadsaberafghan3-cpu/Markt_app
-3. In GitHub, choose **Add file → Upload files** (or the upload option in the mobile browser menu).
-4. Upload the ZIP to the repository root. Keep the exact filename:
-   `nova_marketplace_refunds_phase.zip`
-5. Commit the upload to the `main` branch.
-6. Open Render and create a new **Blueprint** from this GitHub repository. Render reads `render.yaml`.
-7. When Render asks for `ADMIN_PASSWORD`, enter a new strong password and save it.
-8. Wait for the Docker build and deployment to finish. Open the generated `.onrender.com` URL.
+### فروشگاه و نقش‌ها
+- رابط فارسی و راست‌چین با طراحی واکنش‌گرا و ظاهر بوتیکی
+- صفحه اصلی، دسته‌بندی‌ها، جست‌وجو، مرتب‌سازی، جزئیات محصول و سبد خرید
+- حساب مشتری، سفارش‌ها و درخواست بازپرداخت آزمایشی
+- درخواست فروشندگی، نمایش وضعیت، امکان ارسال دوباره پس از رد، تأیید مدیر و کنترل دسترسی بر اساس وضعیت واقعی حساب
+- ثبت و مدیریت محصولات، تأیید محصول فروشنده توسط مدیر، بارگذاری تصویر، مدیریت دسته‌بندی و کاربران
+- مدیریت کد تخفیف، تنظیمات فروشگاه و گزارش پایه
+- فایل‌های CSS و رابط فروشگاهی اصلی از آرشیو MVP حفظ شده‌اند
 
-## Important preview limitations
+### چرخه مالی بازارگاه
+- ثبت سفارش با وضعیت پرداخت در انتظار؛ موجودی تا تأیید پرداخت کم نمی‌شود
+- تراکنش مستقل با مرجع یکتا، کلید idempotency و هش درخواست برای جلوگیری از ثبت دوباره یک سفارش با همان کلید
+- فقط حالت `test` فعال است؛ مسیر تأیید/شکست آزمایشی به مالک سفارش محدود شده و تأیید تکراری دوباره کیف‌پول را شارژ نمی‌کند
+- نرخ کمیسیون عمومی از پنل مدیر قابل تنظیم است (۰ تا ۵۰ درصد)؛ نرخ اختصاصی هر فروشنده نیز قابل تنظیم است
+- نرخ و مبلغ کمیسیون در لحظه ثبت سفارش روی ردیف سفارش snapshot می‌شود تا تغییر بعدی تنظیمات، سفارش قبلی را عوض نکند
+- دفتر کمیسیون با مبلغ ناخالص، نرخ، کمیسیون و خالص فروشنده
+- دفترکل کیف‌پول فروشنده با ثبت‌های بستانکار/بدهکار؛ مانده از دفترکل محاسبه می‌شود
+- مانده قابل درخواست تسویه پس از کسر درخواست‌های تسویه و بازپرداخت‌های در انتظار نمایش داده می‌شود
+- وضعیت تسویه: `requested`، `approved`، `paid`، `rejected`؛ پرداخت فقط پس از تأیید و با شماره مرجع دستی ثبت می‌شود
+- بازپرداخت آزمایشی: درخواست مشتری، بررسی مدیر، معکوس‌سازی سهم فروشنده، ثبت برگشت موجودی و تغییر وضعیت سفارش/تراکنش
+- رخدادهای مالی و مدیریتی مهم در جدول audit ثبت می‌شوند
+- نشست‌ها در همان پایگاه SQLite ذخیره می‌شوند؛ دیگر از MemoryStore پیش‌فرض Express استفاده نمی‌شود
 
-- This blueprint uses Render's free web-service plan so the first visual preview can be launched without choosing a paid plan.
-- Free services may sleep when idle and can take a short time to wake up.
-- The free preview uses temporary storage under `/tmp`. Database records and uploaded product images are **not guaranteed to persist** across restarts or redeployments. Do not use it for real customers or real orders.
-- A production deployment needs persistent storage or a managed database, a stable domain, backups, and real payment-provider integration.
-- Payments and refunds in this code are test-mode simulations only.
+### ارز و کمیسیون
+- واحد پول از پنل مدیریت قابل انتخاب است: `auto`، `EUR`، `USD`، `IRR`، `TOMAN`، `GBP`
+- حالت `auto` بر اساس زبان درخواست مرورگر، کد ارز را انتخاب می‌کند؛ تبدیل نرخ ارز انجام نمی‌شود
+- برای `TOMAN` نمایش اختصاصی «تومان» در رابط کاربری در نظر گرفته شده است
+- کمیسیون عمومی و override فروشنده هر دو بین صفر تا ۵۰ درصد اعتبارسنجی می‌شوند
 
-## Application
+## مرزهای مالی — مهم
 
-- Node.js 20+
-- Express + SQLite
-- Persian RTL storefront
-- Admin, seller, and customer areas
-- Test-mode checkout, seller commission ledger, settlement requests, and full-refund workflow
+**این نسخه درگاه بانکی واقعی ندارد.** مقدار `payment_mode` فقط `test` است. تأیید پرداخت، صرفاً یک شبیه‌سازی داخلی برای آزمون گردش داده و دفترکل است؛ هیچ کارت، حساب بانکی، PSP یا وب‌هوک معتبری متصل نیست.
 
-The Dockerfile extracts the application source from the uploaded ZIP and installs production dependencies automatically. No terminal commands are required from the phone user.
+وضعیت تسویه `paid` به این معنی است که مدیر، پس از انجام انتقال وجه خارج از NOVA، شماره مرجع آن را دستی ثبت کرده است. برنامه پولی جابه‌جا نمی‌کند و انتقال بانکی را راستی‌آزمایی نمی‌کند.
+
+بازپرداخت نیز فقط شبیه‌سازی داخلی است؛ تغییر وضعیت تراکنش و معکوس‌سازی دفترکل به معنی بازگشت پول واقعی به مشتری نیست.
+
+## مهاجرت پایگاه داده
+
+- مهاجرت‌ها افزایشی‌اند: ستون‌ها فقط در صورت نبودن اضافه می‌شوند؛ جدول یا رکورد موجود حذف نمی‌شود.
+- ستون‌های وضعیت پرداخت، snapshot کمیسیون، کلید idempotency، مرجع دفترکل، نشست‌ها و audit اضافه شده‌اند.
+- وضعیت پرداخت سفارش‌های قبلی از تراکنش موجود بازسازی می‌شود.
+- آزمون جداگانه، یک پایگاه قدیمی را با رکورد پرداخت موجود باز می‌کند و حفظ رکورد و اضافه‌شدن ستون‌ها را بررسی می‌کند.
+- پیش از هر انتشار، از فایل SQLite نسخه پشتیبان بگیرید.
+
+## راه‌اندازی محلی
+
+نیازمند Node.js نسخه ۲۰ یا بالاتر و ابزارهای ساخت native برای `better-sqlite3` است.
+
+1. فایل `.env.example` را به `.env` کپی و رمزها را تغییر دهید.
+2. وابستگی‌ها را نصب کنید.
+3. برنامه را اجرا کنید.
+
+```bash
+npm install
+npm run check
+npm test
+npm start
+```
+
+به‌صورت پیش‌فرض برنامه روی `http://localhost:3000` باز می‌شود. مدیر اولیه در اولین راه‌اندازی پایگاه داده با `ADMIN_EMAIL` و `ADMIN_PASSWORD` ساخته می‌شود. اگر مدیر قبلاً وجود داشته باشد، تغییر متغیر محیطی رمز او را خودکار عوض نمی‌کند.
+
+متغیرهای اصلی:
+
+```env
+PORT=3000
+NODE_ENV=development
+DATABASE_PATH=./data/nova.sqlite
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=replace-with-a-unique-password
+SESSION_SECRET=replace-with-a-random-secret-at-least-32-characters
+```
+
+در production، وجود `ADMIN_PASSWORD` و `SESSION_SECRET` با حداقل ۳۲ نویسه الزامی است. کوکی نشست در HTTPS با گزینه secure ارسال می‌شود.
+
+## آزمون‌های اجراشده
+
+GitHub Actions روی Node.js 20 اجرا می‌کند:
+- بررسی نحوی `server.js`، `public/app.js` و `lib/finance.js`
+- آزمون‌های واحد محاسبه کمیسیون، اعتبارسنجی نرخ و شرط تسویه
+- آزمون HTTP یکپارچه ثبت‌نام، تأیید فروشنده، ثبت محصول، snapshot کمیسیون، idempotency سفارش، پرداخت آزمایشی موفق/ناموفق، شارژ یک‌باره کیف‌پول، رزرو و پرداخت دستی تسویه، بازپرداخت و معکوس‌سازی دفترکل
+- آزمون مهاجرت از طرح قدیمی SQLite و حفظ رکوردهای قبلی
+- گزارش npm audit وابستگی‌ها
+
+نتیجه آخرین اجرای موفق CI و فایل ZIP در بخش Artifacts این اجرا در دسترس است:  
+https://github.com/mohammadsaberafghan3-cpu/Markt_app/actions
+
+## موارد تکمیل‌نشده یا آزمون‌نشده
+
+- اتصال درگاه واقعی، وب‌هوک امضاشده، تطبیق پرداخت و بازپرداخت بانکی
+- انتقال وجه خودکار و اتصال سرویس تسویه بانکی
+- رزرو موجودی با زمان انقضا برای سفارش‌های پرداخت‌نشده؛ در حال حاضر موجودی هنگام تأیید پرداخت دوباره بررسی می‌شود
+- تبدیل نرخ ارز، حسابداری چندارزی، مالیات و صورتحساب مالیاتی
+- اتصال کوپن به محاسبه checkout (مدیریت و ایجاد کوپن موجود است، اعمال آن در قیمت نهایی هنوز تکمیل نشده)
+- اتصال حمل‌ونقل، رهگیری، هزینه ارسال، اعلان ایمیل/SMS و KYC فروشندگان
+- بازپرداخت جزئی، مرجوعی چندمرحله‌ای و اختلافات پس از تحویل؛ فعلاً فقط بازپرداخت کامل آزمایشی
+- آزمون مرورگر واقعی/E2E، آزمون بار، آزمون نفوذ و بررسی امنیتی مستقل
+- ذخیره‌سازی پایدار روی Render Free؛ مسیر فعلی `/tmp` موقتی است و با توقف/بازسازی سرویس ممکن است داده‌ها از بین بروند
+- سیاست کامل CSRF و سیاست CSP سخت‌گیرانه؛ هدر CSP فعلاً برای سازگاری با اسکریپت درون‌صفحه‌ای غیرفعال است
+
+این نسخه برای بازبینی و آزمون چرخه مالی MVP است، نه برای دریافت پول واقعی یا استفاده تجاری. برای production باید دیتابیس/فایل‌ها روی ذخیره‌ساز پایدار قرار گیرند، اتصال پرداخت و تسویه واقعی با امضای وب‌هوک و تطبیق مالی پیاده شود و آزمون امنیتی و مرورگری تکمیل شود.
