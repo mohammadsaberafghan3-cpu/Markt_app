@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const session = require("express-session");
-const SQLiteStore = require("better-sqlite3");
+const Database = require("better-sqlite3");
 const bcrypt = require("bcryptjs");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
@@ -17,14 +17,33 @@ if (process.env.NODE_ENV === "production" && (!process.env.SESSION_SECRET || pro
 }
 if (process.env.NODE_ENV === "production") app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT || 3000);
-const db = new SQLiteStore(path.join(__dirname, "nova.sqlite"));
+const dbPath = process.env.DATABASE_PATH || path.join(__dirname, "data", "nova.sqlite");
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+const db = new Database(dbPath);
 const uploadDir = path.join(__dirname, "public", "uploads");
 fs.mkdirSync(uploadDir, { recursive: true });
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+class BetterSqliteSessionStore extends session.Store {
+  get(sid, callback) {
+    try { const row=db.prepare("SELECT sess,expired FROM sessions WHERE sid=?").get(sid); if(!row)return callback(null,null); if(row.expired<=Date.now()){db.prepare("DELETE FROM sessions WHERE sid=?").run(sid);return callback(null,null)} callback(null,JSON.parse(row.sess)); } catch(e) { callback(e); }
+  }
+  set(sid, sess, callback) {
+    try { const expires=sess.cookie&&sess.cookie.expires?new Date(sess.cookie.expires).getTime():Date.now()+7*86400000; db.prepare("INSERT INTO sessions(sid,sess,expired) VALUES(?,?,?) ON CONFLICT(sid) DO UPDATE SET sess=excluded.sess,expired=excluded.expired").run(sid,JSON.stringify(sess),expires); if(callback)callback(null); } catch(e) { if(callback)callback(e); }
+  }
+  touch(sid, sess, callback) {
+    try { const expires=sess.cookie&&sess.cookie.expires?new Date(sess.cookie.expires).getTime():Date.now()+7*86400000; db.prepare("UPDATE sessions SET expired=? WHERE sid=?").run(expires,sid); if(callback)callback(null); } catch(e) { if(callback)callback(e); }
+  }
+  destroy(sid, callback) {
+    try { db.prepare("DELETE FROM sessions WHERE sid=?").run(sid); if(callback)callback(null); } catch(e) { if(callback)callback(e); }
+  }
+}
+
+app.disable("x-powered-by");
 app.use(session({
+  store: new BetterSqliteSessionStore(),
   name: "nova.sid",
   secret: process.env.SESSION_SECRET || "development-only-change-this-secret",
   resave: false, saveUninitialized: false,
@@ -35,7 +54,9 @@ app.use("/uploads", express.static(uploadDir));
 app.use("/api/", rateLimit({ windowMs: 15 * 60 * 1000, limit: 300 }));
 
 db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 db.exec(`
+CREATE TABLE IF NOT EXISTS sessions(sid TEXT PRIMARY KEY,sess TEXT NOT NULL,expired INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS users(
  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
  password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'customer',
@@ -114,6 +135,35 @@ CREATE TABLE IF NOT EXISTS marketplace_commission_reversals(
  seller_net REAL NOT NULL, currency TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 `);
+// Additive, repeatable schema migrations. No existing table or row is dropped.
+function hasColumn(table,name){return db.prepare("PRAGMA table_info("+table+")").all().some(c=>c.name===name)}
+function ensureColumn(table,name,definition){if(!hasColumn(table,name))db.exec("ALTER TABLE "+table+" ADD COLUMN "+name+" "+definition)}
+ensureColumn("orders","payment_status","TEXT NOT NULL DEFAULT 'unpaid'");
+ensureColumn("orders","commission_total","REAL NOT NULL DEFAULT 0");
+ensureColumn("order_items","commission_rate","REAL NOT NULL DEFAULT 0");
+ensureColumn("order_items","commission_amount","REAL NOT NULL DEFAULT 0");
+ensureColumn("payment_transactions","idempotency_key","TEXT");
+ensureColumn("payment_transactions","request_hash","TEXT");
+ensureColumn("payment_transactions","updated_at","TEXT");
+ensureColumn("payment_transactions","failure_reason","TEXT");
+ensureColumn("seller_applications","commission_override","REAL");
+ensureColumn("seller_applications","reviewed_by","INTEGER");
+ensureColumn("seller_wallet_entries","reference_key","TEXT");
+ensureColumn("settlements","processed_by","INTEGER");
+ensureColumn("settlements","updated_at","TEXT");
+ensureColumn("refund_requests","processed_by","INTEGER");
+ensureColumn("refund_requests","updated_at","TEXT");
+db.exec("CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_id INTEGER,action TEXT NOT NULL,details TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_idempotency ON payment_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_seller_wallet_reference ON seller_wallet_entries(reference_key) WHERE reference_key IS NOT NULL");
+db.exec("CREATE INDEX IF NOT EXISTS idx_seller_application_status ON seller_applications(status)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_refund_status ON refund_requests(status)");
+db.prepare("UPDATE orders SET payment_status=COALESCE((SELECT status FROM payment_transactions WHERE payment_transactions.order_id=orders.id),'unpaid')").run();
+db.prepare("UPDATE order_items SET commission_rate=COALESCE((SELECT commission_rate FROM marketplace_commissions WHERE marketplace_commissions.order_item_id=order_items.id),commission_rate),commission_amount=COALESCE((SELECT commission_amount FROM marketplace_commissions WHERE marketplace_commissions.order_item_id=order_items.id),commission_amount)").run();
+function audit(actor,action,details){db.prepare("INSERT INTO audit_logs(actor_id,action,details) VALUES(?,?,?)").run(actor||null,action,String(details||""))}
+function regenerateSession(req,res,user,statusCode=200){req.session.regenerate(err=>{if(err)return res.status(500).json({error:"ساخت نشست امن انجام نشد"});req.session.user=safeUser(user);res.status(statusCode).json({user:req.session.user})})}
+function hashRequest(value){return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex")}
+
 // Safe additive settings migration: existing databases retain all prior records.
 const seedSetting = db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)");
 seedSetting.run("commission_rate", "10");
@@ -148,8 +198,8 @@ const q = (sql, ...args) => db.prepare(sql).all(...args);
 const one = (sql, ...args) => db.prepare(sql).get(...args);
 const run = (sql, ...args) => db.prepare(sql).run(...args);
 const safeUser = u => u && ({ id:u.id, name:u.name, email:u.email, role:u.role, status:u.status });
-function auth(req,res,next){ if(!req.session.user) return res.status(401).json({error:"ابتدا وارد حساب شوید"}); next(); }
-function roles(...allowed){ return (req,res,next)=>{ if(!req.session.user || !allowed.includes(req.session.user.role)) return res.status(403).json({error:"دسترسی مجاز نیست"}); next(); }; }
+function auth(req,res,next){if(!req.session.user)return res.status(401).json({error:"ابتدا وارد حساب شوید"});const current=one("SELECT * FROM users WHERE id=?",req.session.user.id);if(!current||current.status!=="active"){req.session.destroy(()=>{});return res.status(401).json({error:"حساب کاربری فعال نیست"})}req.session.user=safeUser(current);next()}
+function roles(...allowed){return(req,res,next)=>auth(req,res,()=>{if(!allowed.includes(req.session.user.role))return res.status(403).json({error:"دسترسی مجاز نیست"});if(req.session.user.role==="seller"&&!one("SELECT id FROM seller_applications WHERE user_id=? AND status='approved'",req.session.user.id))return res.status(403).json({error:"درخواست فروشندگی تأیید نشده است"});next()})}
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_,__,cb)=>cb(null,uploadDir),
