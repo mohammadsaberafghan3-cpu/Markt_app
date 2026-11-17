@@ -19,6 +19,14 @@ jobs:
           node -e "const a=require('/tmp/nova-audit.json'); for (const [n,v] of Object.entries(a.vulnerabilities||{})) console.log(n+' | '+v.severity+' | direct='+v.isDirect+' | range='+v.range+' | fix='+JSON.stringify(v.fixAvailable)+' | '+v.via.map(x=>typeof x==='string'?x:x.title).join('; '));"
       - run: npm run check
       - run: npm test
+      - name: Inspect existing NOVAMARKET source archive
+        run: |
+          if [ -f NOVAMARKET.zip ]; then
+            echo "Existing repository archive found:"
+            unzip -Z1 NOVAMARKET.zip | sed -n '1,100p'
+          else
+            echo "No legacy archive in repository"
+          fi
       - name: Build distributable source ZIP
         run: |
           mkdir -p /tmp/nova-package
