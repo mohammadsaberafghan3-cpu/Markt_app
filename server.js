@@ -332,47 +332,51 @@ app.get("/api/payments/:reference",auth,(req,res)=>{
 });
 // Refunds are simulation-only. No external payment provider or money movement is involved.
 app.post("/api/orders/:id/refund",auth,(req,res)=>{
- const orderId=Number(req.params.id),reason=String(req.body.reason||'').trim().slice(0,500);
+ if(req.session.user.role!=="customer")return res.status(403).json({error:"فقط مشتری می‌تواند درخواست بازپرداخت ثبت کند"});
+ const orderId=Number(req.params.id),reason=String(req.body?.reason||"").trim().slice(0,500);
+ if(!Number.isSafeInteger(orderId)||orderId<1)return res.status(400).json({error:"شماره سفارش نامعتبر است"});
  const out=db.transaction(()=>{
   const o=one("SELECT * FROM orders WHERE id=? AND customer_id=?",orderId,req.session.user.id);
   if(!o)return {error:"سفارش پیدا نشد",code:404};
   const tx=one("SELECT * FROM payment_transactions WHERE order_id=?",orderId);
-  if(!tx||tx.status!=='paid'||!['new','processing','shipped','completed'].includes(o.status))return {error:"این سفارش در حال حاضر واجد شرایط درخواست بازپرداخت نیست",code:409};
+  if(!tx||tx.status!=="paid"||!["new","processing","shipped","completed"].includes(o.status))return {error:"این سفارش در حال حاضر واجد شرایط درخواست بازپرداخت نیست",code:409};
   if(one("SELECT id FROM refund_requests WHERE order_id=?",orderId))return {error:"برای این سفارش قبلاً درخواست بازپرداخت ثبت شده است",code:409};
   const id=run("INSERT INTO refund_requests(order_id,customer_id,reason) VALUES(?,?,?)",orderId,req.session.user.id,reason).lastInsertRowid;
-  return {id,status:'requested',simulationOnly:true};
+  audit(req.session.user.id,"refund.requested",id+":"+orderId);
+  return {id,status:"requested",simulationOnly:true};
  })();
  if(out.error)return res.status(out.code).json({error:out.error});res.status(201).json(out);
 });
 app.get("/api/admin/refunds",roles("admin"),(req,res)=>res.json(q("SELECT r.*,o.total,o.currency,u.name customer_name,u.email FROM refund_requests r JOIN orders o ON o.id=r.order_id JOIN users u ON u.id=r.customer_id ORDER BY r.id DESC")));
 app.patch("/api/admin/refunds/:id",roles("admin"),(req,res)=>{
- const status=String(req.body.status||''),note=String(req.body.admin_note||'').slice(0,500);
- if(!['approved','rejected'].includes(status))return res.status(400).json({error:"تصمیم بازپرداخت نامعتبر است"});
+ const id=Number(req.params.id),status=String(req.body?.status||""),note=String(req.body?.admin_note||"").trim().slice(0,500);
+ if(!Number.isSafeInteger(id)||id<1||!["approved","rejected"].includes(status))return res.status(400).json({error:"تصمیم بازپرداخت نامعتبر است"});
  try{
   const result=db.transaction(()=>{
-   const r=one("SELECT * FROM refund_requests WHERE id=?",Number(req.params.id));
+   const r=one("SELECT * FROM refund_requests WHERE id=?",id);
    if(!r)return {error:"درخواست پیدا نشد",code:404};
-   if(r.status!=='requested')return {error:"این درخواست قبلاً بررسی شده است",code:409};
-   if(status==='approved'){
+   if(r.status!=="requested")return {error:"این درخواست قبلاً بررسی شده است",code:409};
+   if(status==="approved"){
     const tx=one("SELECT * FROM payment_transactions WHERE order_id=?",r.order_id);
-    if(!tx||tx.status!=='paid')return {error:"تراکنش پرداخت‌شده برای این سفارش یافت نشد",code:409};
+    if(!tx||tx.status!=="paid")return {error:"تراکنش پرداخت‌شده برای این سفارش یافت نشد",code:409};
     const items=q("SELECT * FROM order_items WHERE order_id=?",r.order_id);
     for(const item of items){
      const commission=one("SELECT * FROM marketplace_commissions WHERE order_item_id=?",item.id);
-     if(commission&&!one("SELECT id FROM marketplace_commission_reversals WHERE order_item_id=?",item.id)){
-      run("INSERT INTO marketplace_commission_reversals(order_item_id,order_id,seller_id,gross_amount,commission_amount,seller_net,currency) VALUES(?,?,?,?,?,?,?)",item.id,r.order_id,commission.seller_id,commission.gross_amount,commission.commission_amount,commission.seller_net,commission.currency);
-      run("INSERT INTO seller_wallet_entries(seller_id,order_id,type,amount,currency,description) VALUES(?,?,'debit',?,?,?)",commission.seller_id,r.order_id,commission.seller_net,commission.currency,`برگشت سهم فروشنده بابت بازپرداخت سفارش ${r.order_id}`);
+     if(commission){
+      const reversal=run("INSERT OR IGNORE INTO marketplace_commission_reversals(order_item_id,order_id,seller_id,gross_amount,commission_amount,seller_net,currency) VALUES(?,?,?,?,?,?,?)",item.id,r.order_id,commission.seller_id,commission.gross_amount,commission.commission_amount,commission.seller_net,commission.currency);
+      if(reversal.changes)run("INSERT OR IGNORE INTO seller_wallet_entries(seller_id,order_id,type,amount,currency,description,reference_key) VALUES(?,?,'debit',?,?,?,?)",commission.seller_id,r.order_id,commission.seller_net,commission.currency,"برگشت سهم فروشنده بابت بازپرداخت سفارش "+r.order_id,"refund:"+r.id+":item:"+item.id);
      }
      run("UPDATE products SET stock=stock+? WHERE id=?",item.quantity,item.product_id);
     }
-    run("UPDATE payment_transactions SET status='refunded' WHERE order_id=? AND status='paid'",r.order_id);
-    run("UPDATE orders SET status='refunded' WHERE id=?",r.order_id);
+    run("UPDATE payment_transactions SET status='refunded',updated_at=CURRENT_TIMESTAMP WHERE order_id=? AND status='paid'",r.order_id);
+    run("UPDATE orders SET status='refunded',payment_status='refunded' WHERE id=?",r.order_id);
    }
-   run("UPDATE refund_requests SET status=?,admin_note=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",status,note,r.id);
+   run("UPDATE refund_requests SET status=?,admin_note=?,reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,processed_by=? WHERE id=?",status,note,req.session.user.id,r.id);
+   audit(req.session.user.id,"refund."+status,r.id+":"+r.order_id);
    return {ok:true,status,simulationOnly:true};
   })();
   if(result.error)return res.status(result.code).json({error:result.error});res.json(result);
- }catch(e){res.status(400).json({error:e.message});}
+ }catch(e){res.status(409).json({error:e.message||"بررسی بازپرداخت انجام نشد"})}
 });
 app.get("/api/my-orders",auth,(req,res)=>res.json(q("SELECT o.*,rr.status refund_status FROM orders o LEFT JOIN refund_requests rr ON rr.order_id=o.id WHERE o.customer_id=? ORDER BY o.created_at DESC",req.session.user.id)));
 
