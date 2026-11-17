@@ -15,6 +15,7 @@ const app = express();
 if (process.env.NODE_ENV === "production" && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
   throw new Error("SESSION_SECRET با حداقل ۳۲ کاراکتر برای محیط production الزامی است");
 }
+if (process.env.NODE_ENV === "production" && !process.env.ADMIN_PASSWORD) throw new Error("ADMIN_PASSWORD برای محیط production الزامی است");
 if (process.env.NODE_ENV === "production") app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT || 3000);
 const dbPath = process.env.DATABASE_PATH || path.join(__dirname, "data", "nova.sqlite");
@@ -551,5 +552,8 @@ app.post("/api/admin/coupons",roles("admin"),(req,res)=>{
   catch(e){res.status(400).json({error:"کد تخفیف تکراری یا نامعتبر است"});}
 });
 
+app.get("/health",(req,res)=>res.json({ok:true,service:"nova-market",mode:"test"}));
 app.get("*",(req,res)=>res.sendFile(path.join(__dirname,"public","index.html")));
-app.listen(PORT,()=>console.log(`NOVA Market running: http://localhost:${PORT}`));
+if(require.main===module)app.listen(PORT,"0.0.0.0",()=>console.log("NOVA Market listening on "+PORT));
+module.exports=app;
+module.exports.db=db;
