@@ -491,16 +491,26 @@ app.patch("/api/admin/seller-applications/:id",roles("admin"),(req,res)=>{
 });
 // Seller wallet and settlement ledger. Balances are derived from immutable ledger entries.
 app.get("/api/seller/wallet",roles("seller"),(req,res)=>{
- const currencyRows=q("SELECT currency,ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE -amount END),2) balance FROM seller_wallet_entries WHERE seller_id=? GROUP BY currency",req.session.user.id);
- const entries=q("SELECT * FROM seller_wallet_entries WHERE seller_id=? ORDER BY id DESC LIMIT 100",req.session.user.id);
+ const balances=q("SELECT currency,ROUND(SUM(CASE WHEN type='credit' THEN amount ELSE -amount END),2) balance FROM seller_wallet_entries WHERE seller_id=? GROUP BY currency",req.session.user.id);
  const pending=q("SELECT currency,ROUND(SUM(amount),2) amount FROM settlements WHERE seller_id=? AND status IN ('requested','approved') GROUP BY currency",req.session.user.id);
- res.json({balances:currencyRows,entries,pending});
+ const refunds=q("SELECT c.currency,ROUND(SUM(c.seller_net),2) amount FROM marketplace_commissions c JOIN refund_requests r ON r.order_id=c.order_id WHERE c.seller_id=? AND r.status='requested' GROUP BY c.currency",req.session.user.id);
+ const available=balances.map(b=>{const heldSettlement=(pending.find(x=>x.currency===b.currency)||{}).amount||0,heldRefund=(refunds.find(x=>x.currency===b.currency)||{}).amount||0;return {...b,heldSettlement,heldRefund,available:Math.round((b.balance-heldSettlement-heldRefund)*100)/100}});
+ const entries=q("SELECT * FROM seller_wallet_entries WHERE seller_id=? ORDER BY id DESC LIMIT 100",req.session.user.id);
+ res.json({balances:available,entries,pending,refunds});
 });
 app.post("/api/seller/settlements",roles("seller"),(req,res)=>{
- const amount=Number(req.body.amount),currency=String(req.body.currency||'').trim().toUpperCase();
+ const amount=Number(req.body?.amount),currency=String(req.body?.currency||"").trim().toUpperCase();
  if(!Number.isFinite(amount)||amount<=0||amount>1e9||! /^[A-Z]{3,8}$/.test(currency))return res.status(400).json({error:"مبلغ یا واحد پول نامعتبر است"});
- const r=db.transaction(()=>{const bal=one("SELECT COALESCE(SUM(CASE WHEN type='credit' THEN amount ELSE -amount END),0) n FROM seller_wallet_entries WHERE seller_id=? AND currency=?",req.session.user.id,currency).n;const settlementHeld=one("SELECT COALESCE(SUM(amount),0) n FROM settlements WHERE seller_id=? AND currency=? AND status IN ('requested','approved')",req.session.user.id,currency).n;const refundHeld=one("SELECT COALESCE(SUM(c.seller_net),0) n FROM marketplace_commissions c JOIN refund_requests r ON r.order_id=c.order_id WHERE c.seller_id=? AND c.currency=? AND r.status='requested'",req.session.user.id,currency).n;const held=settlementHeld+refundHeld;if(!canRequestSettlement(bal,held,amount))throw new Error("موجودی قابل تسویه کافی نیست");return run("INSERT INTO settlements(seller_id,amount,currency) VALUES(?,?,?)",req.session.user.id,amount,currency).lastInsertRowid;})();
- res.status(201).json({id:r,status:'requested'});
+ try{
+  const id=db.transaction(()=>{
+   const bal=one("SELECT COALESCE(SUM(CASE WHEN type='credit' THEN amount ELSE -amount END),0) n FROM seller_wallet_entries WHERE seller_id=? AND currency=?",req.session.user.id,currency).n;
+   const settlementHeld=one("SELECT COALESCE(SUM(amount),0) n FROM settlements WHERE seller_id=? AND currency=? AND status IN ('requested','approved')",req.session.user.id,currency).n;
+   const refundHeld=one("SELECT COALESCE(SUM(c.seller_net),0) n FROM marketplace_commissions c JOIN refund_requests r ON r.order_id=c.order_id WHERE c.seller_id=? AND c.currency=? AND r.status='requested'",req.session.user.id,currency).n;
+   if(!canRequestSettlement(bal,settlementHeld+refundHeld,amount))throw new Error("موجودی قابل تسویه کافی نیست");
+   return run("INSERT INTO settlements(seller_id,amount,currency,status) VALUES(?,?,?,'requested')",req.session.user.id,amount,currency).lastInsertRowid;
+  })();
+  audit(req.session.user.id,"settlement.requested",id+":"+amount+":"+currency);res.status(201).json({id,status:"requested"});
+ }catch(e){res.status(400).json({error:e.message||"ثبت درخواست تسویه انجام نشد"})}
 });
 app.get("/api/admin/commissions",roles("admin"),(req,res)=>res.json(q("SELECT c.*,u.name seller_name FROM marketplace_commissions c JOIN users u ON u.id=c.seller_id ORDER BY c.id DESC LIMIT 500")));
 app.get("/api/admin/settlements",roles("admin"),(req,res)=>res.json(q("SELECT s.*,u.name seller_name,u.email FROM settlements s JOIN users u ON u.id=s.seller_id ORDER BY s.id DESC")));
