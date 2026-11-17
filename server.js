@@ -234,11 +234,13 @@ app.patch('/api/admin/settlements/:id',auth,role('admin'),(req,res)=>{
   const tx=db.transaction(()=>{
    const current=db.prepare('SELECT * FROM settlements WHERE id=?').get(id);
    if(status==='approved'){
-    if(current.status!=='pending')throw new Error('فقط درخواست در انتظار قابل تأیید است');
-    db.prepare("UPDATE settlements SET status='approved',processed_at=?,processed_by=? WHERE id=?").run(now(),req.session.user.id,id);
+    if(current.status==='needs_review'){
+     addWalletEntry({vendorId:current.vendor_id,type:'settlement_hold',amount:-current.amount,note:'رزرو پس از بررسی دستی مدیر',refKey:'settlement_hold:'+id});
+    }else if(current.status!=='pending')throw new Error('فقط درخواست در انتظار یا نیازمند بررسی قابل تأیید است');
+    db.prepare("UPDATE settlements SET status='approved',processed_at=?,processed_by=?,rejection_reason=NULL WHERE id=?").run(now(),req.session.user.id,id);
    }else if(status==='rejected'){
-    if(!['pending','approved'].includes(current.status))throw new Error('این درخواست قابل رد نیست');
-    addWalletEntry({vendorId:current.vendor_id,type:'settlement_release',amount:current.amount,note:'آزادسازی مبلغ تسویه ردشده',refKey:'settlement_release:'+id});
+    if(!['pending','approved','needs_review'].includes(current.status))throw new Error('این درخواست قابل رد نیست');
+    if(current.status!=='needs_review')addWalletEntry({vendorId:current.vendor_id,type:'settlement_release',amount:current.amount,note:'آزادسازی مبلغ تسویه ردشده',refKey:'settlement_release:'+id});
     db.prepare("UPDATE settlements SET status='rejected',processed_at=?,processed_by=?,rejection_reason='رد توسط مدیر' WHERE id=?").run(now(),req.session.user.id,id);
    }else{
     if(current.status!=='approved')throw new Error('ابتدا درخواست باید تأیید شود');
