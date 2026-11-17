@@ -72,7 +72,7 @@ test('seller approval, idempotent test payment, commission, wallet, settlement a
  assert.equal(db.prepare('SELECT payment_status FROM orders WHERE id=?').get(order.data.orderId).payment_status,'paid');
  assert.equal(db.prepare('SELECT stock FROM products WHERE id=?').get(product.data.id).stock,8);
  assert.equal(db.prepare("SELECT COUNT(*) n FROM seller_wallet_entries WHERE reference_key LIKE ?").get('payment:%').n,1);
- assert.equal(db.prepare('SELECT balance FROM (SELECT SUM(CASE WHEN type="credit" THEN amount ELSE -amount END) balance FROM seller_wallet_entries WHERE seller_id=?)').get(db.prepare("SELECT id FROM users WHERE email='seller@nova.test'").get().id).balance,176);
+ assert.equal(db.prepare("SELECT SUM(CASE WHEN type='credit' THEN amount ELSE -amount END) balance FROM seller_wallet_entries WHERE seller_id=?").get(db.prepare("SELECT id FROM users WHERE email='seller@nova.test'").get().id).balance,176);
 
  const wallet=await seller.request('/api/seller/wallet');
  assert.equal(wallet.status,200);assert.equal(wallet.data.balances[0].balance,176);
