@@ -1,12 +1,25 @@
 const express=require('express');
 const session=require('express-session');
-const SQLiteStore=require('connect-sqlite3')(session);
 const bcrypt=require('bcryptjs');
 const helmet=require('helmet');
 const path=require('path');
 const crypto=require('crypto');
 if(process.env.NODE_ENV==='production'&&(!process.env.ADMIN_PASSWORD||!process.env.SESSION_SECRET))throw new Error('Set ADMIN_PASSWORD and SESSION_SECRET before production startup');
 const db=require('./db');
+class BetterSqliteSessionStore extends session.Store{
+ get(sid,callback){
+  try{const row=db.prepare('SELECT sess,expired FROM sessions WHERE sid=?').get(sid);if(!row)return callback(null,null);if(row.expired<=Date.now()){db.prepare('DELETE FROM sessions WHERE sid=?').run(sid);return callback(null,null)}callback(null,JSON.parse(row.sess))}catch(err){callback(err)}
+ }
+ set(sid,sess,callback){
+  try{const expires=sess.cookie&&sess.cookie.expires?new Date(sess.cookie.expires).getTime():Date.now()+7*864e5;db.prepare('INSERT INTO sessions(sid,sess,expired) VALUES(?,?,?) ON CONFLICT(sid) DO UPDATE SET sess=excluded.sess,expired=excluded.expired').run(sid,JSON.stringify(sess),expires);if(callback)callback(null)}catch(err){if(callback)callback(err)}
+ }
+ touch(sid,sess,callback){
+  try{const expires=sess.cookie&&sess.cookie.expires?new Date(sess.cookie.expires).getTime():Date.now()+7*864e5;db.prepare('UPDATE sessions SET expired=? WHERE sid=?').run(expires,sid);if(callback)callback(null)}catch(err){if(callback)callback(err)}
+ }
+ destroy(sid,callback){
+  try{db.prepare('DELETE FROM sessions WHERE sid=?').run(sid);if(callback)callback(null)}catch(err){if(callback)callback(err)}
+ }
+}
 const app=express();
 const PORT=process.env.PORT||3000;
 app.disable('x-powered-by');
@@ -14,7 +27,7 @@ app.set('trust proxy',1);
 app.use(helmet({contentSecurityPolicy:false}));
 app.use(express.json({limit:'1mb'}));
 app.use(express.urlencoded({extended:false}));
-app.use(session({store:new SQLiteStore({db:'sessions.sqlite',dir:path.dirname(process.env.DATABASE_PATH||path.join(__dirname,'data','nova.sqlite'))}),secret:process.env.SESSION_SECRET||'development-only-change-me',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:7*864e5}}));
+app.use(session({store:new BetterSqliteSessionStore(),secret:process.env.SESSION_SECRET||'development-only-change-me',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:7*864e5}}));
 app.use(express.static(path.join(__dirname,'public')));
 
 const safe=u=>u?({id:u.id,name:u.name,email:u.email,role:u.role}):null;
