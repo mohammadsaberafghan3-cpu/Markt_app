@@ -40,6 +40,16 @@ jobs:
           rm -f /tmp/nova-package/NOVAMARKET.zip
           cd /tmp/nova-package
           zip -qr "$GITHUB_WORKSPACE/nova_marketplace_mvp.zip" .
+      - name: Extract original MVP for compatibility review
+        run: |
+          mkdir -p /tmp/nova-legacy
+          unzip -q NOVAMARKET.zip -d /tmp/nova-legacy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nova-legacy-source-review
+          path: /tmp/nova-legacy/nova_marketplace
+          if-no-files-found: error
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         with:
           name: nova-marketplace-mvp
