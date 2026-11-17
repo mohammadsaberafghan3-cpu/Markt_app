@@ -209,30 +209,21 @@ const upload = multer({
   fileFilter:(_,f,cb)=>cb(null,/^image\/(jpeg|png|webp|gif)$/.test(f.mimetype))
 });
 
-app.get("/api/config",(req,res)=>res.json({
-  storeName:one("SELECT value FROM settings WHERE key='store_name'").value,
-  currency:one("SELECT value FROM settings WHERE key='currency'").value,
-  user:safeUser(req.session.user),
-  categories:q("SELECT * FROM categories WHERE active=1 ORDER BY name")
-}));
-app.post("/api/register",async(req,res)=>{
-  const {name,email,password}=req.body||{};
-  if(!name||!email||!password||String(password).length<8) return res.status(400).json({error:"نام، ایمیل و رمز حداقل ۸ کاراکتری لازم است"});
-  try{
-    const hash=await bcrypt.hash(String(password),12);
-    const r=run("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,'customer')",String(name).trim(),String(email).toLowerCase().trim(),hash);
-    req.session.user=safeUser(one("SELECT * FROM users WHERE id=?",r.lastInsertRowid));
-    res.json({user:req.session.user});
-  }catch(e){res.status(400).json({error:"این ایمیل قبلاً ثبت شده یا اطلاعات معتبر نیست"});}
+app.get("/api/config",(req,res)=>{let user=null;if(req.session.user){const current=one("SELECT * FROM users WHERE id=?",req.session.user.id);if(current&&current.status==="active"){req.session.user=safeUser(current);user=req.session.user}else req.session.destroy(()=>{})}res.json({storeName:one("SELECT value FROM settings WHERE key='store_name'").value,currency:one("SELECT value FROM settings WHERE key='currency'").value,paymentMode:"test",user,categories:q("SELECT * FROM categories WHERE active=1 ORDER BY name")})});
+const authLimiter=rateLimit({windowMs:15*60*1000,limit:10,standardHeaders:true,legacyHeaders:false});
+app.post("/api/register",authLimiter,async(req,res)=>{
+ const name=String(req.body?.name||"").trim(),email=String(req.body?.email||"").trim().toLowerCase(),password=String(req.body?.password||"");
+ if(name.length<2||name.length>100||email.length>190||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<10||password.length>200)return res.status(400).json({error:"نام، ایمیل معتبر و رمز حداقل ۱۰ کاراکتری لازم است"});
+ try{const hash=await bcrypt.hash(password,12);const r=run("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,'customer')",name,email,hash);regenerateSession(req,res,one("SELECT * FROM users WHERE id=?",r.lastInsertRowid),201)}catch(e){res.status(409).json({error:"این ایمیل قبلاً ثبت شده یا اطلاعات معتبر نیست"})}
 });
-app.post("/api/login",async(req,res)=>{
-  const email=String(req.body.email||"").toLowerCase().trim();
-  const user=one("SELECT * FROM users WHERE email=?",email);
-  if(!user||user.status!=="active"||!(await bcrypt.compare(String(req.body.password||""),user.password_hash))) return res.status(401).json({error:"ایمیل یا رمز عبور اشتباه است"});
-  req.session.user=safeUser(user); res.json({user:req.session.user});
+app.post("/api/login",authLimiter,async(req,res)=>{
+ const email=String(req.body?.email||"").trim().toLowerCase(),password=String(req.body?.password||"");
+ const user=one("SELECT * FROM users WHERE email=?",email);
+ if(!user||user.status!=="active"||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({error:"ایمیل یا رمز عبور اشتباه است"});
+ regenerateSession(req,res,user,200);
 });
-app.post("/api/logout",(req,res)=>req.session.destroy(()=>res.json({ok:true})));
-app.get("/api/me",(req,res)=>res.json({user:safeUser(req.session.user)}));
+app.post("/api/logout",(req,res)=>req.session.destroy(err=>{if(err)return res.status(500).json({error:"خروج انجام نشد"});res.clearCookie("nova.sid");res.json({ok:true})}));
+app.get("/api/me",(req,res)=>{const u=req.session.user?one("SELECT * FROM users WHERE id=? AND status='active'",req.session.user.id):null;if(!u&&req.session.user)req.session.destroy(()=>{});if(u)req.session.user=safeUser(u);res.json({user:safeUser(u)})});
 
 app.get("/api/products",(req,res)=>{
   const {q:term="",category="",sort="new"}=req.query;
