@@ -415,10 +415,11 @@ app.put("/api/manage/products/:id",roles("admin","seller"),(req,res)=>{
   res.json({ok:true});
 });
 app.delete("/api/manage/products/:id",roles("admin","seller"),(req,res)=>{
-  const p=one("SELECT * FROM products WHERE id=?",Number(req.params.id));
-  if(!p)return res.status(404).json({error:"محصول پیدا نشد"});
-  if(req.session.user.role==="seller"&&p.seller_id!==req.session.user.id)return res.status(403).json({error:"دسترسی مجاز نیست"});
-  run("DELETE FROM products WHERE id=?",p.id);res.json({ok:true});
+ const id=Number(req.params.id),p=one("SELECT * FROM products WHERE id=?",id);
+ if(!p)return res.status(404).json({error:"محصول پیدا نشد"});
+ if(req.session.user.role==="seller"&&p.seller_id!==req.session.user.id)return res.status(403).json({error:"دسترسی مجاز نیست"});
+ if(one("SELECT id FROM order_items WHERE product_id=? LIMIT 1",p.id))run("UPDATE products SET status='hidden' WHERE id=?",p.id);else run("DELETE FROM products WHERE id=?",p.id);
+ audit(req.session.user.id,"product.removed",p.id);res.json({ok:true});
 });
 app.get("/api/manage/orders",roles("admin","seller"),(req,res)=>{
   if(req.session.user.role==="seller")return res.json(q("SELECT DISTINCT o.*,u.name customer_name FROM orders o JOIN order_items i ON i.order_id=o.id JOIN users u ON u.id=o.customer_id WHERE i.seller_id=? ORDER BY o.id DESC",req.session.user.id));
@@ -451,12 +452,14 @@ app.post("/api/admin/categories",roles("admin"),(req,res)=>{
 });
 app.get("/api/admin/settings",roles("admin"),(req,res)=>res.json(Object.fromEntries(q("SELECT key,value FROM settings").map(x=>[x.key,x.value]))));
 app.put("/api/admin/settings",roles("admin"),(req,res)=>{
-  const b=req.body||{};
-  if(b.currency!==undefined&&!['auto','EUR','USD','IRR','TOMAN','GBP'].includes(String(b.currency)))return res.status(400).json({error:"واحد پول پشتیبانی نمی‌شود"});
-  if(b.commission_rate!==undefined&&(!Number.isFinite(Number(b.commission_rate))||Number(b.commission_rate)<0||Number(b.commission_rate)>50))return res.status(400).json({error:"کمیسیون باید بین صفر تا ۵۰ درصد باشد"});
-  if(b.payment_mode!==undefined&&b.payment_mode!=='test')return res.status(400).json({error:"در این نسخه فقط حالت آزمایشی پرداخت فعال است"});
-  for(const key of ["currency","store_name","store_description","commission_rate","payment_mode"])if(b[key]!==undefined)run("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",key,String(b[key]).slice(0,200));
-  res.json({ok:true});
+ const b=req.body||{};
+ if(b.currency!==undefined&&!["auto","EUR","USD","IRR","TOMAN","GBP"].includes(String(b.currency)))return res.status(400).json({error:"واحد پول پشتیبانی نمی‌شود"});
+ if(b.commission_rate!==undefined&&(!Number.isFinite(Number(b.commission_rate))||Number(b.commission_rate)<0||Number(b.commission_rate)>50))return res.status(400).json({error:"کمیسیون باید بین صفر تا ۵۰ درصد باشد"});
+ if(b.payment_mode!==undefined&&b.payment_mode!=="test")return res.status(400).json({error:"در این نسخه فقط حالت آزمایشی پرداخت فعال است"});
+ if(b.store_name!==undefined&&String(b.store_name).trim().length>100)return res.status(400).json({error:"نام فروشگاه بیش از حد طولانی است"});
+ if(b.store_description!==undefined&&String(b.store_description).length>1000)return res.status(400).json({error:"توضیحات فروشگاه بیش از حد طولانی است"});
+ const tx=db.transaction(()=>{for(const key of ["currency","store_name","store_description","commission_rate","payment_mode"])if(b[key]!==undefined)run("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",key,String(b[key]).slice(0,1000))});tx();
+ audit(req.session.user.id,"settings.updated",JSON.stringify({currency:b.currency,commission_rate:b.commission_rate,payment_mode:"test"}));res.json({ok:true});
 });
 // Seller application workflow.
 app.post("/api/seller/apply",auth,(req,res)=>{
