@@ -436,9 +436,11 @@ app.patch("/api/manage/orders/:id",roles("admin"),(req,res)=>{
 });
 app.get("/api/admin/users",roles("admin"),(req,res)=>res.json(q("SELECT id,name,email,role,status,created_at FROM users ORDER BY id DESC")));
 app.patch("/api/admin/users/:id",roles("admin"),(req,res)=>{
-  const {role,status}=req.body||{};
-  if(!["admin","seller","customer"].includes(role)||!["active","blocked"].includes(status))return res.status(400).json({error:"اطلاعات نامعتبر"});
-  run("UPDATE users SET role=?,status=? WHERE id=?",role,status,Number(req.params.id));res.json({ok:true});
+ const id=Number(req.params.id),{role,status}=req.body||{};
+ if(!Number.isSafeInteger(id)||id<1||!["admin","seller","customer"].includes(role)||!["active","blocked"].includes(status))return res.status(400).json({error:"اطلاعات نامعتبر"});
+ if(role==="seller"&&!one("SELECT id FROM seller_applications WHERE user_id=? AND status='approved'",id))return res.status(409).json({error:"برای فروشنده‌کردن حساب، ابتدا درخواست فروشندگی باید تأیید شود"});
+ const target=one("SELECT id FROM users WHERE id=?",id);if(!target)return res.status(404).json({error:"کاربر پیدا نشد"});
+ run("UPDATE users SET role=?,status=? WHERE id=?",role,status,id);audit(req.session.user.id,"user.updated",id+":"+role+":"+status);res.json({ok:true});
 });
 app.get("/api/admin/categories",roles("admin"),(req,res)=>res.json(q("SELECT * FROM categories ORDER BY id")));
 app.post("/api/admin/categories",roles("admin"),(req,res)=>{
@@ -458,18 +460,34 @@ app.put("/api/admin/settings",roles("admin"),(req,res)=>{
 });
 // Seller application workflow.
 app.post("/api/seller/apply",auth,(req,res)=>{
- if(req.session.user.role!=='customer')return res.status(409).json({error:"این حساب امکان ثبت درخواست فروشندگی ندارد"});
- const shop=String(req.body.shop_name||'').trim(),description=String(req.body.description||'').trim(),phone=String(req.body.contact_phone||'').trim();
+ if(req.session.user.role!=="customer")return res.status(409).json({error:"این حساب امکان ثبت درخواست فروشندگی ندارد"});
+ const shop=String(req.body?.shop_name||"").trim(),description=String(req.body?.description||"").trim(),phone=String(req.body?.contact_phone||"").trim();
  if(shop.length<2||shop.length>100||description.length>1000||phone.length>30)return res.status(400).json({error:"اطلاعات فروشگاه نامعتبر است"});
- try{const r=run("INSERT INTO seller_applications(user_id,shop_name,description,contact_phone) VALUES(?,?,?,?)",req.session.user.id,shop,description,phone);res.status(201).json({id:r.lastInsertRowid,status:'pending'});}catch(e){res.status(409).json({error:"برای این حساب قبلاً درخواست ثبت شده است"});}
+ try{
+  const existing=one("SELECT * FROM seller_applications WHERE user_id=?",req.session.user.id);
+  if(existing&&existing.status!=="rejected")return res.status(409).json({error:"برای این حساب درخواست فعال یا تأییدشده وجود دارد"});
+  if(existing){run("UPDATE seller_applications SET shop_name=?,description=?,contact_phone=?,status='pending',admin_note='',reviewed_at=NULL,reviewed_by=NULL WHERE id=?",shop,description,phone,existing.id);audit(req.session.user.id,"seller.application.resubmitted",existing.id+":"+shop);return res.json({id:existing.id,status:"pending"})}
+  const r=run("INSERT INTO seller_applications(user_id,shop_name,description,contact_phone) VALUES(?,?,?,?)",req.session.user.id,shop,description,phone);
+  audit(req.session.user.id,"seller.application.created",r.lastInsertRowid+":"+shop);res.status(201).json({id:r.lastInsertRowid,status:"pending"});
+ }catch(e){res.status(409).json({error:"ثبت درخواست فروشندگی انجام نشد"})}
 });
-app.get("/api/seller/application",auth,(req,res)=>res.json(one("SELECT id,shop_name,description,contact_phone,status,admin_note,created_at,reviewed_at FROM seller_applications WHERE user_id=?",req.session.user.id)||null));
+app.get("/api/seller/application",auth,(req,res)=>res.json(one("SELECT id,shop_name,description,contact_phone,status,admin_note,created_at,reviewed_at,commission_override FROM seller_applications WHERE user_id=?",req.session.user.id)||null));
 app.get("/api/admin/seller-applications",roles("admin"),(req,res)=>res.json(q("SELECT a.*,u.name,u.email FROM seller_applications a JOIN users u ON u.id=a.user_id ORDER BY a.id DESC")));
 app.patch("/api/admin/seller-applications/:id",roles("admin"),(req,res)=>{
- const status=String(req.body.status||''),note=String(req.body.admin_note||'').slice(0,500);
- if(!['approved','rejected'].includes(status))return res.status(400).json({error:"تصمیم نامعتبر است"});
- const r=db.transaction(()=>{const a=one("SELECT * FROM seller_applications WHERE id=?",Number(req.params.id));if(!a)return null;if(a.status!=='pending')throw new Error("این درخواست قبلاً بررسی شده است");run("UPDATE seller_applications SET status=?,admin_note=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",status,note,a.id);if(status==='approved')run("UPDATE users SET role='seller' WHERE id=? AND status='active'",a.user_id);return a;})();
- if(!r)return res.status(404).json({error:"درخواست پیدا نشد"});res.json({ok:true,status});
+ const id=Number(req.params.id),status=req.body?.status,note=String(req.body?.admin_note||"").trim().slice(0,500),override=req.body?.commission_override;
+ if(!Number.isSafeInteger(id)||id<1||(status!==undefined&&!["approved","rejected"].includes(status)))return res.status(400).json({error:"شناسه یا تصمیم درخواست معتبر نیست"});
+ let commission=null;
+ if(override!==undefined&&override!==null&&override!==""){commission=Number(override);if(!Number.isFinite(commission)||commission<0||commission>50)return res.status(400).json({error:"کمیسیون اختصاصی باید بین صفر تا ۵۰ درصد باشد"})}
+ try{
+  const result=db.transaction(()=>{
+   const a=one("SELECT * FROM seller_applications WHERE id=?",id);if(!a)return null;
+   if(status!==undefined){if(a.status!=="pending")throw new Error("این درخواست قبلاً بررسی شده است");run("UPDATE seller_applications SET status=?,admin_note=?,reviewed_at=CURRENT_TIMESTAMP,reviewed_by=? WHERE id=?",status,note,req.session.user.id,id);run("UPDATE users SET role=? WHERE id=? AND status='active'",status==="approved"?"seller":"customer",a.user_id)}
+   if(override!==undefined)run("UPDATE seller_applications SET commission_override=? WHERE id=?",commission,id);
+   audit(req.session.user.id,"seller.application.reviewed",JSON.stringify({id,status:status||a.status,commission_override:override===undefined?"unchanged":commission}));
+   return a;
+  })();
+  if(!result)return res.status(404).json({error:"درخواست پیدا نشد"});res.json({ok:true,status:status||result.status,commission_override:override===undefined?result.commission_override:commission});
+ }catch(e){res.status(409).json({error:e.message||"بررسی درخواست انجام نشد"})}
 });
 // Seller wallet and settlement ledger. Balances are derived from immutable ledger entries.
 app.get("/api/seller/wallet",roles("seller"),(req,res)=>{
