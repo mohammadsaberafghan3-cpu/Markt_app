@@ -3,6 +3,8 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
+const {spawnSync}=require('node:child_process');
+const Database=require('better-sqlite3');
 
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nova-market-test-'));
 process.env.DATABASE_PATH=path.join(dir,'nova.sqlite');
@@ -102,8 +104,11 @@ test('test payment, configurable commission, seller approval and settlement rese
  const vendorSummary=await seller.request('/api/vendor/summary');
  assert.equal(vendorSummary.status,200);assert.equal(vendorSummary.data.availableBalance,7600);
 
+ const override=await admin.request('/api/admin/vendors/'+application.data.id,'PATCH',{commission_override:5});
+ assert.equal(override.status,200);
  const failedOrder=await buyer.request('/api/orders','POST',{items:[{product_id:product.data.id,quantity:1}]},{'Idempotency-Key':'checkout-test-key-002'});
  assert.equal(failedOrder.status,201);
+ assert.equal(db.prepare('SELECT commission_rate FROM order_items WHERE order_id=?').get(failedOrder.data.orderId).commission_rate,5);
  const failed=await buyer.request('/api/payments/'+failedOrder.data.paymentId+'/test-fail','POST',{});
  assert.equal(failed.status,200);assert.equal(failed.data.paymentStatus,'failed');
  assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,7600);
@@ -115,4 +120,35 @@ test('test payment, configurable commission, seller approval and settlement rese
  assert.equal(payments.status,200);assert.ok(payments.data.length>=2);
  const badIdempotency=await buyer.request('/api/orders','POST',cart,{'Idempotency-Key':'checkout-test-key-001'});
  assert.equal(badIdempotency.status,200);
+});
+
+
+test('legacy SQLite database is upgraded additively and overcommitted pending settlements are flagged',()=>{
+ const legacyPath=path.join(dir,'legacy.sqlite'),old=new Database(legacyPath);
+ old.exec("PRAGMA foreign_keys=ON;"+
+ "CREATE TABLE users(id INTEGER PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','vendor','customer')),status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"+
+ "CREATE TABLE vendors(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),store_name TEXT NOT NULL,description TEXT DEFAULT '',commission_rate REAL NOT NULL DEFAULT 10,status TEXT NOT NULL DEFAULT 'pending');"+
+ "CREATE TABLE wallets(id INTEGER PRIMARY KEY,vendor_id INTEGER NOT NULL UNIQUE REFERENCES vendors(id),balance INTEGER NOT NULL DEFAULT 0);"+
+ "CREATE TABLE settlements(id INTEGER PRIMARY KEY,vendor_id INTEGER NOT NULL REFERENCES vendors(id),amount INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"+
+ "CREATE TABLE wallet_transactions(id INTEGER PRIMARY KEY,vendor_id INTEGER NOT NULL REFERENCES vendors(id),order_id INTEGER,type TEXT NOT NULL,amount INTEGER NOT NULL,note TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"+
+ "CREATE TABLE orders(id INTEGER PRIMARY KEY,customer_id INTEGER NOT NULL REFERENCES users(id),total INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"+
+ "CREATE TABLE order_items(id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL REFERENCES orders(id),product_id INTEGER NOT NULL,vendor_id INTEGER NOT NULL,quantity INTEGER NOT NULL,unit_price INTEGER NOT NULL,commission INTEGER NOT NULL);"+
+ "CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,actor_id INTEGER,action TEXT NOT NULL,details TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);");
+ const user=old.prepare("INSERT INTO users(name,email,password_hash,role) VALUES('Legacy Seller','legacy-seller@nova.local','x','vendor')").run();
+ const vendor=old.prepare("INSERT INTO vendors(user_id,store_name,status) VALUES(?,?,'approved')").run(user.lastInsertRowid,'Legacy Store');
+ old.prepare('INSERT INTO wallets(vendor_id,balance) VALUES(?,1000)').run(vendor.lastInsertRowid);
+ old.prepare("INSERT INTO settlements(vendor_id,amount,status) VALUES(?,700,'pending')").run(vendor.lastInsertRowid);
+ old.prepare("INSERT INTO settlements(vendor_id,amount,status) VALUES(?,500,'pending')").run(vendor.lastInsertRowid);
+ old.close();
+ const child=spawnSync(process.execPath,['-e',"const db=require('./db');db.close()"],{cwd:path.resolve(__dirname,'..'),encoding:'utf8',env:{...process.env,DATABASE_PATH:legacyPath,ADMIN_EMAIL:'legacy-admin@nova.local',ADMIN_PASSWORD:'LegacyAdminPass123!',SESSION_SECRET:'legacy-session-secret-long-enough',NODE_ENV:'test'}});
+ assert.equal(child.status,0,child.stderr||child.stdout);
+ const upgraded=new Database(legacyPath);
+ const columns=upgraded.prepare('PRAGMA table_info(orders)').all().map(x=>x.name);
+ assert.ok(columns.includes('currency_code'));assert.ok(columns.includes('payment_status'));
+ assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='payment_transactions'").get());
+ assert.equal(upgraded.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(vendor.lastInsertRowid).balance,300);
+ assert.equal(upgraded.prepare('SELECT status FROM settlements WHERE id=1').get().status,'pending');
+ assert.equal(upgraded.prepare('SELECT status FROM settlements WHERE id=2').get().status,'needs_review');
+ assert.equal(upgraded.prepare("SELECT COUNT(*) n FROM wallet_transactions WHERE ref_key='settlement_hold:1'").get().n,1);
+ upgraded.close();
 });
