@@ -19,6 +19,48 @@ CREATE TABLE IF NOT EXISTS settlements(id INTEGER PRIMARY KEY, vendor_id INTEGER
 CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY, actor_id INTEGER REFERENCES users(id), action TEXT NOT NULL, details TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS sessions(sid TEXT PRIMARY KEY, sess TEXT NOT NULL, expired INTEGER NOT NULL);
 `);
+
+function hasColumn(table,name){return db.prepare('PRAGMA table_info('+table+')').all().some(c=>c.name===name)}
+function ensureColumn(table,name,definition){if(!hasColumn(table,name))db.exec('ALTER TABLE '+table+' ADD COLUMN '+name+' '+definition)}
+function migrate(){
+ ensureColumn('vendors','commission_override','REAL');
+ ensureColumn('orders','currency_code',"TEXT NOT NULL DEFAULT 'IRR'");
+ ensureColumn('orders','commission_total','INTEGER NOT NULL DEFAULT 0');
+ ensureColumn('orders','payment_status',"TEXT NOT NULL DEFAULT 'unpaid'");
+ ensureColumn('order_items','commission_rate','REAL NOT NULL DEFAULT 10');
+ ensureColumn('wallet_transactions','ref_key','TEXT');
+ ensureColumn('settlements','processed_at','TEXT');
+ ensureColumn('settlements','processed_by','INTEGER REFERENCES users(id)');
+ ensureColumn('settlements','external_reference','TEXT');
+ ensureColumn('settlements','rejection_reason','TEXT');
+ db.exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+ db.exec("CREATE TABLE IF NOT EXISTS payment_transactions(id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL REFERENCES orders(id),customer_id INTEGER NOT NULL REFERENCES users(id),provider TEXT NOT NULL DEFAULT 'test_gateway',mode TEXT NOT NULL DEFAULT 'test' CHECK(mode IN ('test')),status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','cancelled')),amount INTEGER NOT NULL CHECK(amount>=0),currency_code TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,idempotency_key TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,failure_reason TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,paid_at TEXT)");
+ db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_transactions_ref_key ON wallet_transactions(ref_key) WHERE ref_key IS NOT NULL');
+ db.exec('CREATE INDEX IF NOT EXISTS idx_payments_order ON payment_transactions(order_id)');
+ db.exec('CREATE INDEX IF NOT EXISTS idx_payments_customer ON payment_transactions(customer_id)');
+ db.exec('CREATE INDEX IF NOT EXISTS idx_settlements_vendor_status ON settlements(vendor_id,status)');
+ const seed=db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
+ for(const pair of [['currency_code','IRR'],['currency_symbol','تومان'],['currency_name','تومان'],['commission_rate','10'],['payment_mode','test']])seed.run(...pair);
+ db.prepare("UPDATE orders SET payment_status='succeeded' WHERE status='paid_test' AND payment_status='unpaid'").run();
+ // Reserve legacy pending settlements once; ambiguous/overcommitted legacy requests are flagged for review.
+ const reserveLegacy=db.transaction(()=>{
+  const rows=db.prepare("SELECT * FROM settlements WHERE status='pending' ORDER BY id").all();
+  for(const item of rows){
+   const key='settlement_hold:'+item.id;
+   if(db.prepare('SELECT id FROM wallet_transactions WHERE ref_key=?').get(key))continue;
+   const wallet=db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(item.vendor_id);
+   if(wallet&&wallet.balance>=item.amount){
+    db.prepare('UPDATE wallets SET balance=balance-? WHERE vendor_id=?').run(item.amount,item.vendor_id);
+    db.prepare("INSERT INTO wallet_transactions(vendor_id,type,amount,note,ref_key) VALUES(?,?,?,?,?)").run(item.vendor_id,'settlement_hold',-item.amount,'رزرو درخواست تسویه قدیمی',key);
+   }else{
+    db.prepare("UPDATE settlements SET status='needs_review',rejection_reason='درخواست قدیمی با مانده کیف پول تطبیق داده نشد' WHERE id=?").run(item.id);
+   }
+  }
+ });
+ reserveLegacy();
+}
+migrate();
+
 const bcrypt=require('bcryptjs');
 const adminEmail=(process.env.ADMIN_EMAIL||'admin@novamarket.local').toLowerCase();
 const adminPassword=process.env.ADMIN_PASSWORD||'ChangeThisAdmin123!';
@@ -27,7 +69,6 @@ if(!db.prepare('SELECT id FROM users WHERE email=?').get(adminEmail)){
 }
 const cats=[['دیجیتال','digital'],['مد و پوشاک','fashion'],['خانه و زندگی','home'],['زیبایی و سلامت','beauty'],['ورزش و سفر','sport']];
 const add=db.prepare('INSERT OR IGNORE INTO categories(name,slug) VALUES(?,?)');
-for(const c of cats)add.run(...c);
 for(const c of cats)add.run(...c);
 // A clearly labelled sample storefront keeps a fresh preview from appearing empty.
 const crypto=require('crypto');
@@ -58,4 +99,5 @@ if(db.prepare('SELECT COUNT(*) n FROM products').get().n===0){
  tx();
 }
 
+db.migrate=migrate;
 module.exports=db;
