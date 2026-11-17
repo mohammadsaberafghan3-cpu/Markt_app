@@ -1,68 +1,90 @@
-# NOVA MARKET — marketplace finance milestone
+# NOVA MARKET — نسخه توسعه‌یافته چرخه مالی بازارگاه
 
-A Persian RTL, mobile-first multi-vendor marketplace. This branch preserves the existing `main` branch and the older deployment.
+این پروژه ادامه مستقیم MVP قبلی است. ساختار و فایل‌های فروشگاهی قبلی حفظ شده‌اند و لایه مالی، درخواست فروشندگی و آزمون‌های واحد به آن افزوده شده است. این نسخه هنوز برای دریافت پول واقعی یا انتشار تجاری آماده نیست.
 
-## What this milestone implements
+## قابلیت‌های افزوده‌شده در این مرحله
 
-- Persian RTL storefront, product search/category filtering, cart, customer accounts and vendor onboarding
-- Seller application status: pending, approved, rejected; rejected applications can be resubmitted
-- Admin approval controls vendor access; vendor endpoints verify current approval on every request
-- Global commission rate (0–50%) configurable by admin; optional per-vendor commission override
-- Commission rate and amount are snapshotted per order line so later settings changes do not rewrite old sales
-- Currency code, symbol and display name are configurable by admin; initial default is IRR / تومان
-- Explicit test-only payment transactions with unique references, idempotency keys and guarded state transitions
-- Test payment confirmation checks stock again, decrements stock once, and credits vendor wallets once
-- Vendor wallet ledger and available balance
-- Settlement reservation: requests immediately reserve available funds; approval keeps funds reserved; rejection/cancellation releases them
-- Manual payout recording requires a reference and is clearly marked as an action performed outside NOVA
-- Admin finance settings, payment transaction list, seller commission, settlement queue and audit events
-- Additive SQLite migrations; existing tables and columns are preserved
+- ایجاد سفارش با وضعیت `pending_payment`؛ موجودی تا زمان تأیید پرداخت کم نمی‌شود.
+- ثبت تراکنش پرداخت با شناسه تصادفی و یکتا، مبلغ و واحد پول ثابت‌شده در لحظه سفارش.
+- مسیر تأیید پرداخت آزمایشی (`/api/payments/test/confirm`) با کنترل مالکیت سفارش و idempotency؛ تأیید تکراری، اعتبار کیف‌پول را دوباره افزایش نمی‌دهد.
+- محاسبه کمیسیون قابل تنظیم مدیر (۰ تا ۵۰ درصد)، ثبت عددی ناخالص/کمیسیون/خالص در دفتر کمیسیون و ثبت سهم خالص هر فروشنده در دفترکل؛ نرخ کمیسیون لحظه پرداخت ذخیره می‌شود.
+- کیف‌پول فروشنده بر پایه دفترکل ثبت‌های بستانکار/بدهکار؛ مانده از روی تراکنش‌ها محاسبه می‌شود.
+- درخواست تسویه، نگهداشت مبلغ درخواست‌های باز، تأیید/رد مدیر و ثبت بدهکار دفترکل هنگام ثبت پرداخت تسویه.
+- درخواست فروشندگی از حساب مشتری، بررسی مدیر و ارتقای نقش حساب در صورت تأیید.
+- رابط کاربری ساده برای پرداخت آزمایشی، درخواست فروشندگی، مدیریت درخواست‌ها و کیف‌پول/تسویه.
+- درخواست بازپرداخت توسط مشتری برای سفارش پرداخت‌شده و بررسی مدیر؛ تأیید بازپرداخت آزمایشی، وضعیت تراکنش و سفارش را به `refunded` تغییر می‌دهد، موجودی را برمی‌گرداند و سهم خالص فروشنده را با ثبت بدهکار در دفترکل معکوس می‌کند.
+- مبلغ درخواست بازپرداخت در وضعیت انتظار، در محاسبه موجودی قابل تسویه فروشنده نگه داشته می‌شود تا هم‌زمان با بررسی درخواست، همان مبلغ تسویه نشود.
+- صفحه مدیریتی درخواست‌های بازپرداخت و امکان تأیید/رد؛ پرداخت واقعی به مشتری انجام نمی‌شود.
+- مهاجرت افزایشی SQLite با `CREATE TABLE IF NOT EXISTS` و تنظیمات پیش‌فرض جدید؛ داده‌های قبلی حذف نمی‌شوند.
+- تنظیمات production برای الزام SESSION_SECRET قوی و کوکی secure پشت HTTPS.
 
-## Payment and financial boundaries
+## راه‌اندازی
 
-**Payment mode is hard-coded to TEST in this milestone.** The app does not connect to a bank, card processor, payment gateway, or payout provider. The `test-confirm` endpoint only simulates a successful payment inside the database. Never use it to accept real customer money.
-
-A settlement marked `paid_manual` means an administrator entered a reference after arranging a transfer outside this application. NOVA does not initiate or verify a bank transfer.
-
-Refunds/chargebacks, automated payouts, shipping integrations, persistent media storage, product variants, notifications, full tax/accounting reports, and browser-based end-to-end testing are not implemented in this milestone.
-
-## SQLite migration notes
-
-On startup, the application adds missing finance columns and tables without dropping existing tables. It stores global settings, payment transactions, per-order commission snapshots, and settlement references. Existing pending settlements are reserved once when possible; legacy requests that exceed the existing wallet balance are marked `needs_review` rather than silently overdrawn.
-
-Back up the database before deploying a schema update. Render Free's `/tmp` storage is ephemeral; use a persistent disk or managed database before storing real customer data.
-
-## Local setup
-
-Requirements: Node.js 20+ and native build tools for `better-sqlite3`.
+نیازمند Node.js نسخه 20 یا بالاتر است.
 
 ```bash
 npm install
-ADMIN_EMAIL='admin@example.com' \
-ADMIN_PASSWORD='use-a-unique-password-of-at-least-10-characters' \
-SESSION_SECRET='use-a-long-random-secret' \
-DATABASE_PATH='./data/nova.sqlite' \
+```
+
+فایل `.env.example` را به `.env` کپی کنید و حداقل این مقادیر را تغییر دهید:
+
+```env
+PORT=3000
+SESSION_SECRET=replace-with-a-random-secret-at-least-32-characters
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=replace-with-a-strong-password
+NODE_ENV=development
+```
+
+سپس:
+
+```bash
 npm start
 ```
 
-Open `http://localhost:3000`. The initial admin account is created from the environment variables on first database initialization. If you already have an admin account, changing `ADMIN_PASSWORD` does not overwrite its existing password.
-
-## Automated verification
+برای آزمون‌های مستقل منطق مالی:
 
 ```bash
-npm run check
 npm test
 ```
 
-The integration test covers registration, seller approval, commission snapshot, idempotent checkout, test payment success/failure, single wallet credit, settlement reservation/release/manual payout state, currency settings and role restrictions.
+## چرخه آزمایشی پرداخت
 
-GitHub Actions also creates a `nova_marketplace_mvp.zip` artifact after successful checks. Download it from the latest successful workflow run's **Artifacts** section.
+1. مشتری ثبت‌نام و وارد حساب می‌شود.
+2. سفارش ثبت می‌شود و در وضعیت `pending_payment` می‌ماند.
+3. رابط کاربری دکمه «تأیید پرداخت آزمایشی» را نشان می‌دهد.
+4. با تأیید آزمایشی، تراکنش `paid` می‌شود، موجودی کم می‌شود و سهم خالص فروشنده در دفترکل ثبت می‌شود.
+5. فروشنده از پنل کیف‌پول درخواست تسویه ثبت می‌کند.
+6. مدیر درخواست را تأیید، رد یا به‌عنوان پرداخت‌شده ثبت می‌کند.
 
-## Deploying a separate preview on Render
+**هشدار:** مسیر پرداخت فقط شبیه‌سازی داخلی است؛ هیچ درگاه بانکی، PSP، وب‌هوک معتبر یا جابه‌جایی پولی متصل نیست. مدیر هنگام ثبت `paid` برای تسویه، پرداخت واقعی را خارج از سامانه انجام داده و صرفاً مرجع آن را ثبت می‌کند.
 
-1. Create a new Blueprint from this repository and select branch `nova-market-rebuild`.
-2. Keep the current `main`-based service unchanged.
-3. Set a strong `ADMIN_PASSWORD`; Render generates `SESSION_SECRET`.
-4. Wait for deploy completion and verify `/health`.
+## APIهای اصلی افزوده‌شده
 
-A passing CI run verifies syntax and the automated API/database test paths only. It does not prove that a Render deployment, production persistence, payment gateway, manual bank payout, or complete browser experience has been verified.
+- `POST /api/payments/test/confirm` — تأیید آزمایشی متعلق به مشتری
+- `GET /api/payments/:reference` — مشاهده وضعیت تراکنش متعلق به مشتری
+- `POST /api/seller/apply` و `GET /api/seller/application`
+- `GET /api/admin/seller-applications` و `PATCH /api/admin/seller-applications/:id`
+- `GET /api/seller/wallet` و `POST /api/seller/settlements`
+- `GET /api/admin/settlements` و `PATCH /api/admin/settlements/:id`
+- `GET /api/admin/commissions` — دفتر عددی کمیسیون‌ها
+- `POST /api/orders/:id/refund` — درخواست بازپرداخت توسط مشتری
+- `GET /api/admin/refunds` و `PATCH /api/admin/refunds/:id` — بررسی بازپرداخت توسط مدیر
+- تنظیمات مدیر: `commission_rate` و `payment_mode=test`
+
+## آزمون و محدودیت شواهد
+
+در این محیط، `node --check` برای فایل سرور و رابط کاربری و چهار آزمون واحد منطق کمیسیون/تسویه/شرایط بازپرداخت با `node --test` اجرا شده‌اند. همچنین ساختار SQL جداول جدید به‌صورت مستقل با SQLite بررسی شده است. نصب وابستگی‌های npm به علت عدم دسترسی/پاسخ رجیستری در زمان اجرا تکمیل نشد؛ بنابراین سرور با SQLite واقعی بالا نیامد و آزمون یکپارچه HTTP، مهاجرت دیتابیس و رابط مرورگر اجرا نشده‌اند. چهار آزمون سبز، آزمون مسیرهای HTTP یا اثبات آمادگی تولید نیستند.
+
+## مواردی که هنوز تکمیل نشده‌اند
+
+- اتصال درگاه واقعی، امضای وب‌هوک، تطبیق پرداخت و بازپرداخت واقعی؛ بازپرداخت افزوده‌شده صرفاً شبیه‌سازی داخلی است.
+- رزرو/انقضای خودکار سفارش‌های پرداخت‌نشده و آزادسازی رزرو؛ در حال حاضر موجودی هنگام پرداخت نهایی دوباره بررسی می‌شود.
+- حسابداری چندارزی و تبدیل نرخ ارز؛ `auto` انتخاب ارز بر اساس زبان درخواست است و نرخ تبدیل انجام نمی‌دهد.
+- تسویه خودکار بانکی، احراز هویت فروشندگان/KYC و مدارک کسب‌وکار.
+- سیاست کامل بازپرداخت جزئی/کامل، بازپرداخت چندمرحله‌ای و رسیدگی به مرجوعی پس از تحویل؛ فعلاً فقط بازپرداخت کامل آزمایشی پیاده‌سازی شده است.
+- کوپن در checkout، مالیات، حمل‌ونقل/رهگیری، ایمیل/SMS، گزارش مالی کامل و لاگ ممیزی مدیریتی.
+- ذخیره‌ساز پایدار session (در حال حاضر session پیش‌فرض Express است)، CSRF protection، محدودسازی جداگانه login، آزمون امنیتی و آزمون بار.
+- اصلاح کامل همه صفحات مدیریتی و تجربه کاربری در اندازه‌های مختلف.
+
+قبل از استفاده عمومی باید وابستگی‌ها نصب، رمز مدیر و SESSION_SECRET تعویض، HTTPS و session store پایدار تنظیم، و آزمون‌های یکپارچه و امنیتی اجرا شوند.

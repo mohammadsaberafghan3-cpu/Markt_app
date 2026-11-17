@@ -1,9 +1,25 @@
 {
-  "name":"nova-market",
-  "version":"2.1.0",
-  "private":true,
-  "description":"NOVA MARKET multi-vendor marketplace with test payment and seller ledger",
-  "engines":{"node":">=20"},
-  "scripts":{"start":"node server.js","test":"node --test","check":"node --check server.js && node --check db.js && node --check public/app.js"},
-  "dependencies":{"bcryptjs":"^2.4.3","better-sqlite3":"^11.8.1","express":"^4.21.2","express-session":"^1.18.1","helmet":"^8.0.0"}
+  "name": "nova-marketplace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persian RTL multi-vendor ecommerce MVP",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0",
+    "multer": "^1.4.5-lts.1"
+  }
 }
