@@ -17,7 +17,7 @@ jobs:
         run: |
           npm audit --json > /tmp/nova-audit.json || true
           node -e "const a=require('/tmp/nova-audit.json'); for (const [n,v] of Object.entries(a.vulnerabilities||{})) console.log(n+' | '+v.severity+' | direct='+v.isDirect+' | range='+v.range+' | fix='+JSON.stringify(v.fixAvailable)+' | '+v.via.map(x=>typeof x==='string'?x:x.title).join('; '));"
-      - run: npm run check
+      - run: node --check server.js && node --check public/app.js && node --check lib/finance.js
       - run: npm test
       - name: Inspect existing NOVAMARKET source archive
         run: |
