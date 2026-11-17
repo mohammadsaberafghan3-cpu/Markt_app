@@ -13,7 +13,7 @@ process.env.ADMIN_PASSWORD='TestOnlyAdminPass123!';
 process.env.SESSION_SECRET='test-session-secret-that-is-long-enough';
 process.env.NODE_ENV='test';
 
-const db=require('../db');
+const db=require('./db');
 const app=require('../server');
 let server,base;
 class Client{
