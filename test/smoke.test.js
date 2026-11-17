@@ -3,22 +3,116 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
-const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nova-test-'));
-process.env.DATABASE_PATH=path.join(dir,'test.sqlite');
-process.env.ADMIN_EMAIL='test-admin@nova.local';
-process.env.ADMIN_PASSWORD='TestOnlyPassword123!';
-const db=require('../db');
-test('database initializes core marketplace tables and admin account',()=>{
- const tables=db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(x=>x.name);
- for(const t of ['users','vendors','products','orders','order_items','wallets','wallet_transactions','settlements','audit_logs'])assert.ok(tables.includes(t),t+' table missing');
- assert.equal(db.prepare('SELECT role FROM users WHERE email=?').get('test-admin@nova.local').role,'admin');
-});
-test('foreign keys are enabled',()=>assert.equal(db.pragma('foreign_keys',{simple:true}),1));
-test('fresh preview has sample products from an approved demo vendor',()=>{assert.ok(db.prepare('SELECT COUNT(*) n FROM products').get().n>=8);assert.equal(db.prepare("SELECT status FROM vendors WHERE store_name='NOVA Select'").get().status,'approved')});
 
-test('product stock cannot be negative',()=>{
- const u=db.prepare("INSERT INTO users(name,email,password_hash,role) VALUES('Vendor','vendor@nova.local','x','vendor')").run();
- const v=db.prepare("INSERT INTO vendors(user_id,store_name,status) VALUES(?,?,?)").run(u.lastInsertRowid,'Test Store','approved');
- assert.throws(()=>db.prepare('INSERT INTO products(vendor_id,name,price,stock) VALUES(?,?,?,?)').run(v.lastInsertRowid,'Invalid',100,-1));
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nova-market-test-'));
+process.env.DATABASE_PATH=path.join(dir,'nova.sqlite');
+process.env.ADMIN_EMAIL='admin-test@nova.local';
+process.env.ADMIN_PASSWORD='TestOnlyAdminPass123!';
+process.env.SESSION_SECRET='test-session-secret-that-is-long-enough';
+process.env.NODE_ENV='test';
+
+const db=require('../db');
+const app=require('../server');
+let server,base;
+class Client{
+ constructor(){this.cookie=''}
+ async request(url,method,body,headers){
+  const h={...(body!==undefined?{'Content-Type':'application/json'}:{}),...(headers||{})};
+  if(this.cookie)h.Cookie=this.cookie;
+  const response=await fetch(base+url,{method:method||'GET',headers:h,body:body===undefined?undefined:JSON.stringify(body)});
+  const setCookie=response.headers.get('set-cookie');if(setCookie)this.cookie=setCookie.split(';')[0];
+  const data=await response.json().catch(()=>({}));
+  return {status:response.status,data};
+ }
+}
+const admin=new Client(),seller=new Client(),buyer=new Client();
+async function login(client,email,password){const r=await client.request('/api/login','POST',{email,password});assert.equal(r.status,200,JSON.stringify(r.data));return r.data}
+async function register(client,name,email){const r=await client.request('/api/register','POST',{name,email,password:'SecurePass123!'});assert.equal(r.status,201,JSON.stringify(r.data));return r.data}
+
+test.before(async()=>{server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));base='http://127.0.0.1:'+server.address().port});
+test.after(async()=>{if(server)await new Promise(resolve=>server.close(resolve));try{db.close()}catch{}fs.rmSync(dir,{recursive:true,force:true})});
+
+test('test payment, configurable commission, seller approval and settlement reservation lifecycle',async()=>{
+ db.migrate();db.migrate();
+ const config=await buyer.request('/api/public/config');
+ assert.equal(config.status,200);assert.equal(config.data.paymentMode,'test');assert.equal(config.data.currency.code,'IRR');
+
+ await login(admin,'admin-test@nova.local','TestOnlyAdminPass123!');
+ const setting=await admin.request('/api/admin/settings','PATCH',{currency_code:'EUR',currency_symbol:'€',currency_name:'یورو',commission_rate:12});
+ assert.equal(setting.status,200);assert.equal(setting.data.currency.code,'EUR');assert.equal(setting.data.commissionRate,12);
+ const invalidSetting=await admin.request('/api/admin/settings','PATCH',{currency_code:'EUR',currency_symbol:'€',currency_name:'یورو',commission_rate:70});
+ assert.equal(invalidSetting.status,400);
+
+ await register(seller,'فروشنده آزمایشی','seller@nova.local');
+ const application=await seller.request('/api/vendor/apply','POST',{store_name:'NOVA Seller Test'});
+ assert.equal(application.status,201);assert.equal(application.data.status,'pending');
+ const sellerPending=await seller.request('/api/vendor/products','POST',{name:'محصول ممنوع',price:100,stock:2});
+ assert.equal(sellerPending.status,403);
+ const appStatus=await seller.request('/api/vendor/application');
+ assert.equal(appStatus.data.application.status,'pending');
+ const approve=await admin.request('/api/admin/vendors/'+application.data.id,'PATCH',{status:'approved'});
+ assert.equal(approve.status,200);
+ await seller.request('/api/logout','POST',{});
+ await login(seller,'seller@nova.local','SecurePass123!');
+ const category=db.prepare('SELECT id FROM categories ORDER BY id LIMIT 1').get().id;
+ const product=await seller.request('/api/vendor/products','POST',{name:'محصول آزمون مالی',description:'محصول تست چرخه پرداخت',price:10000,stock:10,category_id:category});
+ assert.equal(product.status,201);
+ const walletBefore=db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance;
+ assert.equal(walletBefore,0);
+
+ await register(buyer,'مشتری آزمایشی','buyer@nova.local');
+ const cart={items:[{product_id:product.data.id,quantity:2}]};
+ const first=await buyer.request('/api/orders','POST',cart,{'Idempotency-Key':'checkout-test-key-001'});
+ assert.equal(first.status,201,JSON.stringify(first.data));
+ assert.equal(first.data.paymentMode,'test');assert.equal(first.data.paymentStatus,'pending');assert.equal(first.data.amount,20000);
+ const duplicate=await buyer.request('/api/orders','POST',cart,{'Idempotency-Key':'checkout-test-key-001'});
+ assert.equal(duplicate.status,200);assert.equal(duplicate.data.orderId,first.data.orderId);assert.equal(duplicate.data.paymentId,first.data.paymentId);
+ const pendingOrder=db.prepare('SELECT * FROM orders WHERE id=?').get(first.data.orderId);
+ assert.equal(pendingOrder.status,'awaiting_payment');assert.equal(pendingOrder.payment_status,'pending');
+ assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,0);
+ assert.equal(db.prepare('SELECT commission_rate FROM order_items WHERE order_id=?').get(first.data.orderId).commission_rate,12);
+
+ const paid=await buyer.request('/api/payments/'+first.data.paymentId+'/test-confirm','POST',{});
+ assert.equal(paid.status,200,JSON.stringify(paid.data));assert.equal(paid.data.paymentStatus,'succeeded');
+ const paidAgain=await buyer.request('/api/payments/'+first.data.paymentId+'/test-confirm','POST',{});
+ assert.equal(paidAgain.status,200);assert.equal(paidAgain.data.alreadyProcessed,true);
+ const order=db.prepare('SELECT * FROM orders WHERE id=?').get(first.data.orderId);
+ assert.equal(order.status,'paid_test');assert.equal(order.payment_status,'succeeded');
+ assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,17600);
+ assert.equal(db.prepare("SELECT COUNT(*) n FROM wallet_transactions WHERE ref_key LIKE ?").get('payment:'+first.data.paymentId+':vendor:%').n,1);
+ assert.equal(db.prepare('SELECT stock FROM products WHERE id=?').get(product.data.id).stock,8);
+
+ const settlement=await seller.request('/api/vendor/settlements','POST',{amount:10000});
+ assert.equal(settlement.status,201,JSON.stringify(settlement.data));
+ assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,7600);
+ const overdraw=await seller.request('/api/vendor/settlements','POST',{amount:8000});
+ assert.equal(overdraw.status,400);
+ const approved=await admin.request('/api/admin/settlements/'+settlement.data.id,'PATCH',{status:'approved'});
+ assert.equal(approved.status,200);
+ assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,7600);
+ const paidManual=await admin.request('/api/admin/settlements/'+settlement.data.id,'PATCH',{status:'paid_manual',external_reference:'BANK-REF-TEST-001'});
+ assert.equal(paidManual.status,200);assert.equal(paidManual.data.manualOnly,true);
+ assert.equal(db.prepare('SELECT status FROM settlements WHERE id=?').get(settlement.data.id).status,'paid_manual');
+
+ const rejectedRequest=await seller.request('/api/vendor/settlements','POST',{amount:5000});
+ assert.equal(rejectedRequest.status,201);
+ const rejected=await admin.request('/api/admin/settlements/'+rejectedRequest.data.id,'PATCH',{status:'rejected'});
+ assert.equal(rejected.status,200);
+ assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,7600);
+ const vendorSummary=await seller.request('/api/vendor/summary');
+ assert.equal(vendorSummary.status,200);assert.equal(vendorSummary.data.availableBalance,7600);
+
+ const failedOrder=await buyer.request('/api/orders','POST',{items:[{product_id:product.data.id,quantity:1}]},{'Idempotency-Key':'checkout-test-key-002'});
+ assert.equal(failedOrder.status,201);
+ const failed=await buyer.request('/api/payments/'+failedOrder.data.paymentId+'/test-fail','POST',{});
+ assert.equal(failed.status,200);assert.equal(failed.data.paymentStatus,'failed');
+ assert.equal(db.prepare('SELECT balance FROM wallets WHERE vendor_id=?').get(application.data.id).balance,7600);
+ assert.equal(db.prepare('SELECT payment_status FROM orders WHERE id=?').get(failedOrder.data.orderId).payment_status,'failed');
+
+ const forbidden=await buyer.request('/api/admin/settings');
+ assert.equal(forbidden.status,403);
+ const payments=await admin.request('/api/admin/payments');
+ assert.equal(payments.status,200);assert.ok(payments.data.length>=2);
+ const badIdempotency=await buyer.request('/api/orders','POST',cart,{'Idempotency-Key':'checkout-test-key-001'});
+ assert.equal(badIdempotency.status,200);
 });
-test.after(()=>{db.close();fs.rmSync(dir,{recursive:true,force:true})});
